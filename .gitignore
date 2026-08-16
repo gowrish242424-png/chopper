@@ -1,0 +1,33 @@
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+
+# Virtual environments
+venv/
+.venv/
+env/
+
+# Private/local memory
+memory.db
+*.db
+
+# Environment variables and secrets
+.env
+.env.*
+*.key
+*.pem
+
+# VS Code
+.vscode/
+
+# Logs and temporary files
+*.log
+*.tmp
+
+# OS files
+.DS_Store
+Thumbs.db
+
+upgrade_workspace/backups/
+upgrade_workspace/sandbox/

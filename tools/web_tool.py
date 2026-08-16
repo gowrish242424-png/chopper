@@ -1432,11 +1432,8 @@ def requested_result_count(query, default=5):
 
 def search_web(query, max_results=6):
     """
-    Real general web search.
-
-    The complete user question is sent directly to multiple
-    search engines. No keyword-based query classification,
-    rewriting, news routing, or hard-coded answers are used.
+    Real general web search without keyword routing.
+    Sends the complete question directly to multiple engines.
     """
 
     query = query.strip()
@@ -1449,48 +1446,31 @@ def search_web(query, max_results=6):
 
     all_results = []
 
-    # Search several independent engines.
-    # If one engine fails on Render, the others can still work.
-    backends = [
-        "google",
-        "bing",
-        "brave",
-        "duckduckgo",
-        "wikipedia",
-    ]
+    # DDGS searches these engines together instead of
+    # searching them one after another.
+    try:
+        all_results = DDGS(timeout=10).text(
+            query=query,
+            region="in-en",
+            safesearch="moderate",
+            max_results=15,
+            backend="google,brave,bing,duckduckgo,wikipedia",
+        )
+    except Exception as error:
+        print(f"⚠️ Multi-engine search failed: {error}")
 
-    for backend in backends:
+    # One quick fallback
+    if not all_results:
         try:
-            results = DDGS(timeout=15).text(
+            all_results = DDGS(timeout=8).text(
                 query=query,
                 region="in-en",
                 safesearch="moderate",
                 max_results=10,
-                backend=backend,
-            )
-
-            if results:
-                print(
-                    f"✅ {backend}: {len(results)} results"
-                )
-                all_results.extend(results)
-
-        except Exception as error:
-            print(f"⚠️ {backend} failed: {error}")
-
-    # Let DDGS automatically select engines if every
-    # individually selected engine failed.
-    if not all_results:
-        try:
-            all_results = DDGS(timeout=20).text(
-                query=query,
-                region="in-en",
-                safesearch="moderate",
-                max_results=15,
                 backend="auto",
             )
         except Exception as error:
-            print(f"❌ Automatic search failed: {error}")
+            print(f"❌ Fallback search failed: {error}")
             all_results = []
 
     if not all_results:
@@ -1501,8 +1481,6 @@ def search_web(query, max_results=6):
     if not unique_results:
         return ""
 
-    # Rank results without rejecting them based on
-    # manually defined query categories.
     for result in unique_results:
         url = result.get("href") or result.get("url") or ""
 

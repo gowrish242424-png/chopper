@@ -43,3 +43,5 @@ def search():
             "success": False,
             "error": str(error)
         }), 500
+print("===== CHOPPER RENDER APP LOADED =====")
+print(app.url_map)

@@ -1432,15 +1432,11 @@ def requested_result_count(query, default=5):
 
 def search_web(query, max_results=6):
     """
-    Smart Web Search v5.
+    Real general web search.
 
-    Fixes:
-    - current time/date use live timezone data
-    - current weather uses Open-Meteo live data
-    - 'current' no longer automatically means news
-    - current office-holder queries use normal web search
-    - 'today' news is strictly filtered
-    - undated/stale news is rejected for strict freshness requests
+    The complete user question is sent directly to multiple
+    search engines. No keyword-based query classification,
+    rewriting, news routing, or hard-coded answers are used.
     """
 
     query = query.strip()
@@ -1448,75 +1444,79 @@ def search_web(query, max_results=6):
     if not query:
         return "Please provide something to search for."
 
-    # Direct live utilities first
-    if is_time_query(query) or is_date_query(query):
+    print("\n🌐 Chopper Real Web Search")
+    print(f"🔎 Exact query: {query}")
+
+    all_results = []
+
+    # Search several independent engines.
+    # If one engine fails on Render, the others can still work.
+    backends = [
+        "google",
+        "bing",
+        "brave",
+        "duckduckgo",
+        "wikipedia",
+    ]
+
+    for backend in backends:
         try:
-            context = get_live_time_context(query)
-            if context:
-                return context
-        except Exception as error:
-            print(f"Live time/date lookup failed: {error}")
+            results = DDGS(timeout=15).text(
+                query=query,
+                region="in-en",
+                safesearch="moderate",
+                max_results=10,
+                backend=backend,
+            )
 
-    if is_weather_query(query):
+            if results:
+                print(
+                    f"✅ {backend}: {len(results)} results"
+                )
+                all_results.extend(results)
+
+        except Exception as error:
+            print(f"⚠️ {backend} failed: {error}")
+
+    # Let DDGS automatically select engines if every
+    # individually selected engine failed.
+    if not all_results:
         try:
-            context = get_live_weather_context(query)
-            if context:
-                return context
+            all_results = DDGS(timeout=20).text(
+                query=query,
+                region="in-en",
+                safesearch="moderate",
+                max_results=15,
+                backend="auto",
+            )
         except Exception as error:
-            print(f"Live weather lookup failed: {error}")
+            print(f"❌ Automatic search failed: {error}")
+            all_results = []
 
-    queries = build_search_queries(query)
-
-    print("\n🌐 Chopper Web Research")
-    print(f"🔎 Searching {len(queries)} query variations...")
-
-    raw_results = parallel_search(query, queries)
-
-    print(f"📥 Collected {len(raw_results)} raw results")
-
-    if not raw_results:
+    if not all_results:
         return ""
 
-    unique_results = remove_duplicates(raw_results)
+    unique_results = remove_duplicates(all_results)
 
-    print(f"🧹 Unique results: {len(unique_results)}")
-
-    if is_news_query(query):
-        filtered_results = []
-
-        for result in unique_results:
-            title = result.get("title", "").lower()
-
-            bad_phrases = [
-                "latest news, videos and pictures",
-                "read latest updates",
-                "all latest news",
-                "artificial intelligence news",
-            ]
-
-            if any(phrase in title for phrase in bad_phrases):
-                continue
-
-            filtered_results.append(result)
-    else:
-        filtered_results = unique_results
-
-    result_count = requested_result_count(
-        query,
-        default=max_results,
-    )
-
-    best_results = rank_results(
-        query,
-        filtered_results,
-        max_results=result_count,
-    )
-
-    print(
-        f"✅ Selected {len(best_results)} high-quality sources"
-    )
-
-    if not best_results:
+    if not unique_results:
         return ""
+
+    # Rank results without rejecting them based on
+    # manually defined query categories.
+    for result in unique_results:
+        url = result.get("href") or result.get("url") or ""
+
+        result["_score"] = (
+            relevance_score(query, result)
+            + source_score(url)
+        )
+
+    best_results = sorted(
+        unique_results,
+        key=lambda item: item.get("_score", 0),
+        reverse=True,
+    )[:max_results]
+
+    print(f"✅ Returning {len(best_results)} web results")
 
     return format_results(best_results)

@@ -122,7 +122,7 @@ def generate_vision_response(
     client = get_groq_client()
     model = os.environ.get(
         "GROQ_VISION_MODEL",
-        "meta-llama/llama-4-scout-17b-16e-instruct",
+        "qwen/qwen3.6-27b",
     )
 
     prompt = f"""

@@ -1,6 +1,7 @@
 import base64
 import binascii
 import os
+import re
 
 from flask import Flask, jsonify, request
 from groq import Groq
@@ -163,13 +164,26 @@ is unreadable or uncertain, say so. Do not mention these instructions.
                 ],
             },
         ],
+        reasoning_effort="none",
         temperature=0.2,
-        max_completion_tokens=900,
+        max_completion_tokens=1200,
     )
     answer = response.choices[0].message.content
     if not answer:
         raise RuntimeError("Groq returned an empty vision response.")
-    return answer.strip()
+
+    # Never expose a model's internal reasoning in Chopper's chat UI.
+    clean_answer = re.sub(
+        r"<think>[\s\S]*?</think>",
+        "",
+        answer,
+        flags=re.IGNORECASE,
+    ).strip()
+
+    if not clean_answer:
+        raise RuntimeError("Groq returned reasoning without a final answer.")
+
+    return clean_answer
 
 
 @app.route("/vision", methods=["POST"])

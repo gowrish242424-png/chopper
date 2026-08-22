@@ -289,6 +289,71 @@ def generate_image_with_cloudflare(prompt):
     return image_base64
 
 
+def edit_image_with_cloudflare(prompt, source_image_base64):
+    account_id = os.environ.get("CLOUDFLARE_ACCOUNT_ID", "").strip()
+    api_token = os.environ.get("CLOUDFLARE_API_TOKEN", "").strip()
+    if not account_id or not api_token:
+        raise RuntimeError("Cloudflare image editing is not configured.")
+
+    model = "@cf/runwayml/stable-diffusion-v1-5-img2img"
+    endpoint = (
+        "https://api.cloudflare.com/client/v4/accounts/"
+        f"{account_id}/ai/run/{model}"
+    )
+    payload = json.dumps({
+        "prompt": prompt,
+        "negative_prompt": "distorted face, duplicate person, extra limbs, blurry",
+        "image_b64": source_image_base64,
+        "strength": 0.72,
+        "guidance": 7.5,
+        "num_steps": 20,
+    }).encode("utf-8")
+    cloudflare_request = urllib.request.Request(
+        endpoint,
+        data=payload,
+        method="POST",
+        headers={
+            "Authorization": f"Bearer {api_token}",
+            "Content-Type": "application/json",
+        },
+    )
+
+    try:
+        with urllib.request.urlopen(cloudflare_request, timeout=180) as response:
+            response_bytes = response.read()
+            content_type = response.headers.get_content_type()
+    except urllib.error.HTTPError as error:
+        details_text = error.read().decode("utf-8", errors="replace")
+        try:
+            details = json.loads(details_text)
+            messages = details.get("errors") or []
+            message = messages[0].get("message") if messages else None
+        except Exception:
+            message = None
+        raise RuntimeError(
+            message or f"Cloudflare image editing failed ({error.code})."
+        ) from error
+    except urllib.error.URLError as error:
+        raise RuntimeError("Could not connect to Cloudflare image editing.") from error
+
+    if content_type.startswith("image/"):
+        if not response_bytes:
+            raise RuntimeError("Cloudflare returned an empty edited image.")
+        return base64.b64encode(response_bytes).decode("ascii"), content_type
+
+    try:
+        result = json.loads(response_bytes.decode("utf-8"))
+        if not result.get("success"):
+            raise RuntimeError("Cloudflare did not edit the image.")
+        image_base64 = str((result.get("result") or {}).get("image", "")).strip()
+        if not image_base64:
+            raise RuntimeError("Cloudflare returned an empty edited image.")
+        base64.b64decode(image_base64, validate=True)
+        return image_base64, "image/png"
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise RuntimeError("Cloudflare returned an unsupported image response.") from error
+
+
 @app.route("/generate-image", methods=["POST"])
 def generate_image():
     data = request.get_json(silent=True) or {}
@@ -311,6 +376,37 @@ def generate_image():
         return jsonify({"success": False, "error": "Invalid generated image"}), 502
     except Exception as error:
         print(f"Image generation failed: {error}")
+        return jsonify({"success": False, "error": str(error)}), 500
+
+
+@app.route("/edit-image", methods=["POST"])
+def edit_image():
+    data = request.get_json(silent=True) or {}
+    prompt = str(data.get("prompt", "")).strip()
+    image_base64 = str(data.get("image_base64", "")).strip()
+
+    if not prompt:
+        return jsonify({"success": False, "error": "No editing instruction provided"}), 400
+    if not image_base64:
+        return jsonify({"success": False, "error": "No source image provided"}), 400
+    if len(prompt) > 2048:
+        return jsonify({"success": False, "error": "Editing instruction is too long"}), 400
+
+    try:
+        base64.b64decode(image_base64, validate=True)
+        edited_base64, mime_type = edit_image_with_cloudflare(
+            prompt, image_base64
+        )
+        return jsonify({
+            "success": True,
+            "prompt": prompt,
+            "mime_type": mime_type,
+            "image_base64": edited_base64,
+        })
+    except (binascii.Error, ValueError):
+        return jsonify({"success": False, "error": "Invalid source image"}), 400
+    except Exception as error:
+        print(f"Image editing failed: {error}")
         return jsonify({"success": False, "error": str(error)}), 500
 
 

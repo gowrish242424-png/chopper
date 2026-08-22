@@ -2,7 +2,6 @@ import base64
 import binascii
 import json
 import os
-import random
 import re
 import urllib.error
 import urllib.request
@@ -250,7 +249,7 @@ def generate_image_with_cloudflare(prompt):
     payload = json.dumps({
         "prompt": prompt,
         "steps": 4,
-        "seed": random.randint(1, 2_147_483_647),
+
     }).encode("utf-8")
     cloudflare_request = urllib.request.Request(
         endpoint,

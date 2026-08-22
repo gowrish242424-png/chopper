@@ -1,7 +1,11 @@
 import base64
 import binascii
+import json
 import os
+import random
 import re
+import urllib.error
+import urllib.request
 
 from flask import Flask, jsonify, request
 from groq import Groq
@@ -221,6 +225,93 @@ def vision():
         return jsonify({"success": False, "error": "Invalid image data"}), 400
     except Exception as error:
         print(f"Vision generation failed: {error}")
+        return jsonify({"success": False, "error": str(error)}), 500
+
+
+# =========================================================
+# IMAGE GENERATION TOOL
+# =========================================================
+
+def generate_image_with_cloudflare(prompt):
+    account_id = os.environ.get("CLOUDFLARE_ACCOUNT_ID", "").strip()
+    api_token = os.environ.get("CLOUDFLARE_API_TOKEN", "").strip()
+
+    if not account_id or not api_token:
+        raise RuntimeError("Cloudflare image generation is not configured.")
+
+    model = os.environ.get(
+        "CLOUDFLARE_IMAGE_MODEL",
+        "@cf/black-forest-labs/flux-1-schnell",
+    ).strip()
+    endpoint = (
+        "https://api.cloudflare.com/client/v4/accounts/"
+        f"{account_id}/ai/run/{model}"
+    )
+    payload = json.dumps({
+        "prompt": prompt,
+        "steps": 4,
+        "seed": random.randint(1, 2_147_483_647),
+    }).encode("utf-8")
+    cloudflare_request = urllib.request.Request(
+        endpoint,
+        data=payload,
+        method="POST",
+        headers={
+            "Authorization": f"Bearer {api_token}",
+            "Content-Type": "application/json",
+        },
+    )
+
+    try:
+        with urllib.request.urlopen(cloudflare_request, timeout=120) as response:
+            result = json.loads(response.read().decode("utf-8"))
+    except urllib.error.HTTPError as error:
+        try:
+            details = json.loads(error.read().decode("utf-8"))
+            messages = details.get("errors") or []
+            message = messages[0].get("message") if messages else None
+        except Exception:
+            message = None
+        raise RuntimeError(
+            message or f"Cloudflare image generation failed ({error.code})."
+        ) from error
+    except urllib.error.URLError as error:
+        raise RuntimeError("Could not connect to Cloudflare image generation.") from error
+
+    if not result.get("success"):
+        raise RuntimeError("Cloudflare did not generate an image.")
+
+    image_base64 = str((result.get("result") or {}).get("image", "")).strip()
+    if not image_base64:
+        raise RuntimeError("Cloudflare returned an empty image.")
+
+    # Validate the result before forwarding it to the phone.
+    base64.b64decode(image_base64, validate=True)
+    return image_base64
+
+
+@app.route("/generate-image", methods=["POST"])
+def generate_image():
+    data = request.get_json(silent=True) or {}
+    prompt = str(data.get("prompt", "")).strip()
+
+    if not prompt:
+        return jsonify({"success": False, "error": "No image prompt provided"}), 400
+    if len(prompt) > 2048:
+        return jsonify({"success": False, "error": "Image prompt is too long"}), 400
+
+    try:
+        image_base64 = generate_image_with_cloudflare(prompt)
+        return jsonify({
+            "success": True,
+            "prompt": prompt,
+            "mime_type": "image/jpeg",
+            "image_base64": image_base64,
+        })
+    except (binascii.Error, ValueError):
+        return jsonify({"success": False, "error": "Invalid generated image"}), 502
+    except Exception as error:
+        print(f"Image generation failed: {error}")
         return jsonify({"success": False, "error": str(error)}), 500
 
 

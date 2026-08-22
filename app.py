@@ -3,6 +3,7 @@ import binascii
 import json
 import os
 import re
+import time
 import urllib.error
 import urllib.request
 
@@ -318,23 +319,37 @@ def edit_image_with_cloudflare(prompt, source_image_base64):
         },
     )
 
-    try:
-        with urllib.request.urlopen(cloudflare_request, timeout=180) as response:
-            response_bytes = response.read()
-            content_type = response.headers.get_content_type()
-    except urllib.error.HTTPError as error:
-        details_text = error.read().decode("utf-8", errors="replace")
+    response_bytes = b""
+    content_type = "application/octet-stream"
+    for attempt in range(4):
         try:
-            details = json.loads(details_text)
-            messages = details.get("errors") or []
-            message = messages[0].get("message") if messages else None
-        except Exception:
-            message = None
-        raise RuntimeError(
-            message or f"Cloudflare image editing failed ({error.code})."
-        ) from error
-    except urllib.error.URLError as error:
-        raise RuntimeError("Could not connect to Cloudflare image editing.") from error
+            with urllib.request.urlopen(cloudflare_request, timeout=180) as response:
+                response_bytes = response.read()
+                content_type = response.headers.get_content_type()
+                break
+        except urllib.error.HTTPError as error:
+            details_text = error.read().decode("utf-8", errors="replace")
+            try:
+                details = json.loads(details_text)
+                messages = details.get("errors") or []
+                message = messages[0].get("message") if messages else None
+            except Exception:
+                message = None
+
+            error_message = message or f"Cloudflare image editing failed ({error.code})."
+            temporary_error = (
+                error.code in {429, 500, 502, 503, 504}
+                or "capacity temporarily exceeded" in error_message.lower()
+            )
+            if temporary_error and attempt < 3:
+                time.sleep((2, 5, 10)[attempt])
+                continue
+            raise RuntimeError(error_message) from error
+        except urllib.error.URLError as error:
+            if attempt < 3:
+                time.sleep((2, 5, 10)[attempt])
+                continue
+            raise RuntimeError("Could not connect to Cloudflare image editing.") from error
 
     if content_type.startswith("image/"):
         if not response_bytes:

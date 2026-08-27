@@ -1469,9 +1469,9 @@ def _search_from_plan(search_query, search_mode, freshness_days, limit):
     ))
 
 
-def _matches_required_concepts(result, required_concepts):
-    """Check model-supplied topic concepts, not words detected from the query."""
-    if not required_concepts:
+def _matches_required_groups(result, required_groups):
+    """Require every term in at least one AI-generated semantic group."""
+    if not required_groups:
         return True
 
     combined = " ".join((
@@ -1480,9 +1480,13 @@ def _matches_required_concepts(result, required_concepts):
     ))
     result_words = tokenize(combined)
 
-    for concept in required_concepts:
-        concept_words = tokenize(str(concept))
-        if concept_words and concept_words.issubset(result_words):
+    for group in required_groups:
+        if not isinstance(group, list):
+            continue
+        group_words = set()
+        for item in group:
+            group_words.update(tokenize(str(item)))
+        if len(group_words) >= 2 and group_words.issubset(result_words):
             return True
 
     return False
@@ -1516,13 +1520,13 @@ def search_web(query, max_results=6, search_plan=None):
         str(item).strip() for item in planned_queries[:5] if str(item).strip()
     ] or [query]
 
-    required_concepts = plan.get("required_concepts")
-    if not isinstance(required_concepts, list):
-        required_concepts = []
-    required_concepts = [
-        str(item).strip()
-        for item in required_concepts[:8]
-        if str(item).strip()
+    required_groups = plan.get("required_concept_groups")
+    if not isinstance(required_groups, list):
+        required_groups = []
+    required_groups = [
+        group[:8]
+        for group in required_groups[:8]
+        if isinstance(group, list) and len(group) >= 2
     ]
 
     all_results = []
@@ -1557,7 +1561,7 @@ def search_web(query, max_results=6, search_plan=None):
     unique_results = [
         result
         for result in unique_results
-        if _matches_required_concepts(result, required_concepts)
+        if _matches_required_groups(result, required_groups)
     ]
 
     if not unique_results:

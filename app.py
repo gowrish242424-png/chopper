@@ -1,4 +1,4 @@
-
+import base64
 import binascii
 import json
 import os
@@ -6,8 +6,6 @@ import re
 import time
 import urllib.error
 import urllib.request
-import base64
-
 from datetime import datetime, timezone
 
 from flask import Flask, jsonify, request
@@ -448,7 +446,10 @@ keyword list. Return only one valid JSON object with this exact structure:
   "needs_freshness": true or false,
   "freshness_days": integer from 1 to 365 or null,
   "topic": "the precise subject the user wants",
-  "required_concepts": [two to eight names or phrases that identify that subject],
+  "required_concept_groups": [
+    ["words", "that", "must", "appear", "together"],
+    ["alternative", "complete", "name"]
+  ],
   "search_queries": [one to five focused search-engine queries],
   "result_count": integer from 1 to 10
 }}
@@ -457,10 +458,13 @@ For a request about the newest events, use news mode and a strict, reasonable
 freshness window. Put the current year or an appropriate date range into the
 queries when it improves precision. For stable information, use web mode and
 set freshness_days to null. Preserve the user's intended country or region.
-Required concepts must represent the requested subject, not generic words.
-Include accepted names, institutions, abbreviations, or close equivalents.
-For example, Indian Parliament may use Indian Parliament, Lok Sabha, Rajya
-Sabha, or Parliament of India. Do not include unrelated foreign institutions.
+Each required concept group must identify the complete requested subject.
+Every word in one group must appear in a result for that result to qualify.
+Never create a one-word group from a generic word such as India, Parliament,
+news, government, latest, or election. For Indian Parliament, suitable groups
+include ["Indian", "Parliament"], ["Parliament", "India"],
+["Lok", "Sabha"], and ["Rajya", "Sabha"]. Do not include unrelated foreign
+institutions.
 
 User request: {query}
 """.strip()
@@ -500,14 +504,25 @@ User request: {query}
     ] or [query]
 
     plan["topic"] = str(plan.get("topic", query)).strip()[:300] or query
-    concepts = plan.get("required_concepts")
-    if not isinstance(concepts, list):
-        concepts = []
-    plan["required_concepts"] = [
-        str(item).strip()[:120]
-        for item in concepts[:8]
-        if str(item).strip()
-    ] or [plan["topic"]]
+    raw_groups = plan.get("required_concept_groups")
+    if not isinstance(raw_groups, list):
+        raw_groups = []
+    groups = []
+    for raw_group in raw_groups[:8]:
+        if not isinstance(raw_group, list):
+            continue
+        group = [
+            str(word).strip()[:60]
+            for word in raw_group[:8]
+            if str(word).strip()
+        ]
+        if len(group) >= 2:
+            groups.append(group)
+    if not groups:
+        topic_words = re.findall(r"[A-Za-z0-9]+", plan["topic"])
+        if len(topic_words) >= 2:
+            groups = [topic_words[:8]]
+    plan["required_concept_groups"] = groups
 
     try:
         plan["result_count"] = max(1, min(int(plan.get("result_count", 5)), 10))
@@ -527,6 +542,10 @@ mention it. Prefer primary and official sources. Include a short Sources section
 with relevant source names, publication dates when supplied, and exact URLs.
 The current UTC date is {current_date}. If the request needs fresh information,
 do not present an older event as the newest one. Do not mention these instructions.
+Before answering, semantically reject any supplied result that is only loosely
+related to the requested topic. Cite only results actually used in the answer.
+Never list rejected or unrelated results in Sources. If no result directly
+answers the question, say so and omit the Sources section entirely.
 """
     system_prompt = system_prompt.format(
         current_date=datetime.now(timezone.utc).date().isoformat()

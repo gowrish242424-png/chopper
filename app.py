@@ -569,7 +569,7 @@ Answer the user's question using only these results.
             {"role": "user", "content": user_prompt},
         ],
         temperature=0.1,
-        max_completion_tokens=600,
+        max_completion_tokens=1200,
     )
     answer = response.choices[0].message.content
     if not answer:

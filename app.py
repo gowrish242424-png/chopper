@@ -469,59 +469,78 @@ institutions.
 User request: {query}
 """.strip()
 
-    def parse_plan_content(content):
-        if not content:
-            raise ValueError("Empty search plan")
-        cleaned = re.sub(
-            r"<think>[\s\S]*?</think>",
-            "",
-            content,
-            flags=re.IGNORECASE,
-        ).strip()
-        cleaned = re.sub(r"^```(?:json)?\s*|\s*```$", "", cleaned).strip()
-        try:
-            return json.loads(cleaned)
-        except json.JSONDecodeError:
-            start = cleaned.find("{")
-            end = cleaned.rfind("}")
-            if start == -1 or end <= start:
-                raise
-            return json.loads(cleaned[start:end + 1])
+    search_plan_schema = {
+        "name": "chopper_search_plan",
+        "strict": True,
+        "schema": {
+            "type": "object",
+            "properties": {
+                "search_mode": {
+                    "type": "string",
+                    "enum": ["news", "web"],
+                },
+                "needs_freshness": {"type": "boolean"},
+                "freshness_days": {
+                    "anyOf": [
+                        {"type": "integer"},
+                        {"type": "null"},
+                    ]
+                },
+                "topic": {"type": "string"},
+                "required_concept_groups": {
+                    "type": "array",
+                    "items": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                    },
+                },
+                "search_queries": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                },
+                "result_count": {"type": "integer"},
+            },
+            "required": [
+                "search_mode",
+                "needs_freshness",
+                "freshness_days",
+                "topic",
+                "required_concept_groups",
+                "search_queries",
+                "result_count",
+            ],
+            "additionalProperties": False,
+        },
+    }
 
     plan = None
-    first_error = None
-    try:
-        response = client.chat.completions.create(
-            model="openai/gpt-oss-20b",
-            messages=[{"role": "user", "content": prompt}],
-            temperature=0,
-            max_completion_tokens=500,
-            response_format={"type": "json_object"},
-        )
-        plan = parse_plan_content(response.choices[0].message.content)
-    except Exception as error:
-        first_error = error
-
-    # Some Groq generations fail strict JSON validation before returning any
-    # content. Retry without strict mode and parse the model's JSON safely.
-    if plan is None:
-        retry_prompt = (
-            prompt
-            + "\n\nYour previous strict-JSON attempt failed validation. "
-              "Return only the JSON object, with no markdown or explanation."
-        )
+    last_error = None
+    for _attempt in range(2):
         try:
             response = client.chat.completions.create(
                 model="openai/gpt-oss-20b",
-                messages=[{"role": "user", "content": retry_prompt}],
+                messages=[{"role": "user", "content": prompt}],
                 temperature=0,
-                max_completion_tokens=600,
+                reasoning_effort="low",
+                include_reasoning=False,
+                max_completion_tokens=1200,
+                response_format={
+                    "type": "json_schema",
+                    "json_schema": search_plan_schema,
+                },
             )
-            plan = parse_plan_content(response.choices[0].message.content)
-        except Exception as retry_error:
-            raise RuntimeError(
-                f"Search planning failed after retry: {retry_error}"
-            ) from first_error
+            content = response.choices[0].message.content
+            if not content:
+                raise RuntimeError("Groq returned an empty strict search plan.")
+            plan = json.loads(content)
+            break
+        except Exception as error:
+            last_error = error
+
+    if plan is None:
+        raise RuntimeError(
+            f"Strict search planning failed after retry: {last_error}"
+        )
 
     if not isinstance(plan, dict):
         raise RuntimeError("Groq returned an invalid search plan.")

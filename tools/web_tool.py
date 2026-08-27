@@ -1469,6 +1469,25 @@ def _search_from_plan(search_query, search_mode, freshness_days, limit):
     ))
 
 
+def _matches_required_concepts(result, required_concepts):
+    """Check model-supplied topic concepts, not words detected from the query."""
+    if not required_concepts:
+        return True
+
+    combined = " ".join((
+        str(result.get("title", "")),
+        str(result.get("body", "") or result.get("summary", "")),
+    ))
+    result_words = tokenize(combined)
+
+    for concept in required_concepts:
+        concept_words = tokenize(str(concept))
+        if concept_words and concept_words.issubset(result_words):
+            return True
+
+    return False
+
+
 def search_web(query, max_results=6, search_plan=None):
     """
     Execute the AI-generated semantic plan without keyword-based routing.
@@ -1497,6 +1516,15 @@ def search_web(query, max_results=6, search_plan=None):
         str(item).strip() for item in planned_queries[:5] if str(item).strip()
     ] or [query]
 
+    required_concepts = plan.get("required_concepts")
+    if not isinstance(required_concepts, list):
+        required_concepts = []
+    required_concepts = [
+        str(item).strip()
+        for item in required_concepts[:8]
+        if str(item).strip()
+    ]
+
     all_results = []
     with ThreadPoolExecutor(max_workers=min(len(planned_queries), 5)) as executor:
         futures = {
@@ -1522,6 +1550,15 @@ def search_web(query, max_results=6, search_plan=None):
         return ""
 
     unique_results = remove_duplicates(all_results)
+
+    if not unique_results:
+        return ""
+
+    unique_results = [
+        result
+        for result in unique_results
+        if _matches_required_concepts(result, required_concepts)
+    ]
 
     if not unique_results:
         return ""

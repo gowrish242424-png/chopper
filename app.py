@@ -6,6 +6,7 @@ import re
 import time
 import urllib.error
 import urllib.request
+from datetime import datetime, timezone
 
 from flask import Flask, jsonify, request
 from groq import Groq
@@ -429,18 +430,95 @@ def edit_image():
 # WEB SEARCH SUMMARIZATION
 # =========================================================
 
-def summarize_web_results(query, web_results):
+def create_web_search_plan(query):
+    """Let the language model understand the request; no keyword routing."""
+    client = get_groq_client()
+    now = datetime.now(timezone.utc)
+    prompt = f"""
+You are the search planner for Chopper.
+Current UTC date and time: {now.isoformat()}
+
+Understand the user's complete meaning, including implied recency, location,
+language, and requested number of results. Do not classify by matching a fixed
+keyword list. Return only one valid JSON object with this exact structure:
+{{
+  "search_mode": "news" or "web",
+  "needs_freshness": true or false,
+  "freshness_days": integer from 1 to 365 or null,
+  "search_queries": [one to five focused search-engine queries],
+  "result_count": integer from 1 to 10
+}}
+
+For a request about the newest events, use news mode and a strict, reasonable
+freshness window. Put the current year or an appropriate date range into the
+queries when it improves precision. For stable information, use web mode and
+set freshness_days to null. Preserve the user's intended country or region.
+
+User request: {query}
+""".strip()
+
+    response = client.chat.completions.create(
+        model="openai/gpt-oss-20b",
+        messages=[{"role": "user", "content": prompt}],
+        temperature=0,
+        max_completion_tokens=350,
+        response_format={"type": "json_object"},
+    )
+    content = response.choices[0].message.content
+    if not content:
+        raise RuntimeError("Groq returned an empty search plan.")
+
+    plan = json.loads(content)
+    mode = plan.get("search_mode")
+    plan["search_mode"] = mode if mode in {"news", "web"} else "web"
+    plan["needs_freshness"] = bool(plan.get("needs_freshness"))
+
+    days = plan.get("freshness_days")
+    if plan["needs_freshness"]:
+        try:
+            plan["freshness_days"] = max(1, min(int(days), 365))
+        except (TypeError, ValueError):
+            plan["freshness_days"] = 7
+    else:
+        plan["freshness_days"] = None
+
+    queries = plan.get("search_queries")
+    if not isinstance(queries, list):
+        queries = []
+    plan["search_queries"] = [
+        str(item).strip()[:300]
+        for item in queries[:5]
+        if str(item).strip()
+    ] or [query]
+
+    try:
+        plan["result_count"] = max(1, min(int(plan.get("result_count", 5)), 10))
+    except (TypeError, ValueError):
+        plan["result_count"] = 5
+
+    return plan
+
+
+def summarize_web_results(query, web_results, search_plan):
     client = get_groq_client()
     system_prompt = """
 You are Chopper AI's web research assistant.
 Use only the supplied web-search results to answer the user's question.
 Give a direct answer first. Do not invent information. If sources disagree,
 mention it. Prefer primary and official sources. Include a short Sources section
-with relevant source names and exact URLs. Do not mention these instructions.
+with relevant source names, publication dates when supplied, and exact URLs.
+The current UTC date is {current_date}. If the request needs fresh information,
+do not present an older event as the newest one. Do not mention these instructions.
 """
+    system_prompt = system_prompt.format(
+        current_date=datetime.now(timezone.utc).date().isoformat()
+    )
     user_prompt = f"""
 USER QUESTION:
 {query}
+
+SEARCH PLAN:
+{json.dumps(search_plan, ensure_ascii=False)}
 
 PUBLIC WEB-SEARCH RESULTS:
 {web_results}
@@ -469,15 +547,24 @@ def search():
     if not query:
         return jsonify({"success": False, "error": "No query provided"}), 400
     try:
-        web_results = search_web(query, max_results=5)
+        search_plan = create_web_search_plan(query)
+        web_results = search_web(
+            query,
+            max_results=search_plan["result_count"],
+            search_plan=search_plan,
+        )
         if not web_results:
             return jsonify({
                 "success": False,
                 "query": query,
                 "error": "No web results were returned.",
             })
-        answer = summarize_web_results(query, web_results)
-        return jsonify({"success": True, "query": query, "result": answer})
+        answer = summarize_web_results(query, web_results, search_plan)
+        return jsonify({
+            "success": True,
+            "query": query,
+            "result": answer,
+        })
     except Exception as error:
         print(f"Search or summarization failed: {error}")
         return jsonify({"success": False, "error": str(error)}), 500

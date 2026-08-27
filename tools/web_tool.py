@@ -3,6 +3,7 @@
 
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone, timedelta
+from email.utils import parsedate_to_datetime
 from urllib.parse import urlparse, urlencode
 from urllib.request import Request, urlopen
 from zoneinfo import ZoneInfo
@@ -776,7 +777,13 @@ def _parse_result_date(date_value):
         return published.astimezone(timezone.utc)
 
     except Exception:
-        return None
+        try:
+            published = parsedate_to_datetime(str(date_value).strip())
+            if published.tzinfo is None:
+                published = published.replace(tzinfo=timezone.utc)
+            return published.astimezone(timezone.utc)
+        except Exception:
+            return None
 
 
 def freshness_score(result, news_query=False, horizon=None):
@@ -1430,10 +1437,41 @@ def requested_result_count(query, default=5):
 
     return default
 
-def search_web(query, max_results=6):
+def _plan_timelimit(freshness_days):
+    if freshness_days is None:
+        return None
+    if freshness_days <= 1:
+        return "d"
+    if freshness_days <= 7:
+        return "w"
+    if freshness_days <= 31:
+        return "m"
+    return None
+
+
+def _search_from_plan(search_query, search_mode, freshness_days, limit):
+    ddgs = DDGS(timeout=10)
+    if search_mode == "news":
+        return list(ddgs.news(
+            query=search_query,
+            region="in-en",
+            safesearch="moderate",
+            timelimit=_plan_timelimit(freshness_days),
+            max_results=limit,
+            backend="auto",
+        ))
+    return list(ddgs.text(
+        query=search_query,
+        region="in-en",
+        safesearch="moderate",
+        max_results=limit,
+        backend="auto",
+    ))
+
+
+def search_web(query, max_results=6, search_plan=None):
     """
-    Real general web search without keyword routing.
-    Sends the complete question directly to multiple engines.
+    Execute the AI-generated semantic plan without keyword-based routing.
     """
 
     query = query.strip()
@@ -1441,37 +1479,44 @@ def search_web(query, max_results=6):
     if not query:
         return "Please provide something to search for."
 
-    print("\n🌐 Chopper Real Web Search")
-    print(f"🔎 Exact query: {query}")
+    plan = search_plan if isinstance(search_plan, dict) else {}
+    search_mode = plan.get("search_mode", "web")
+    if search_mode not in {"news", "web"}:
+        search_mode = "web"
+    needs_freshness = bool(plan.get("needs_freshness"))
+    freshness_days = plan.get("freshness_days") if needs_freshness else None
+    try:
+        freshness_days = int(freshness_days) if freshness_days is not None else None
+    except (TypeError, ValueError):
+        freshness_days = None
+
+    planned_queries = plan.get("search_queries")
+    if not isinstance(planned_queries, list):
+        planned_queries = []
+    planned_queries = [
+        str(item).strip() for item in planned_queries[:5] if str(item).strip()
+    ] or [query]
 
     all_results = []
+    with ThreadPoolExecutor(max_workers=min(len(planned_queries), 5)) as executor:
+        futures = {
+            executor.submit(
+                _search_from_plan, item, search_mode, freshness_days, 12
+            ): item
+            for item in planned_queries
+        }
+        for future in as_completed(futures):
+            try:
+                all_results.extend(future.result())
+            except Exception as error:
+                print(f"Search failed for '{futures[future]}': {error}")
 
-    # DDGS searches these engines together instead of
-    # searching them one after another.
-    try:
-        all_results = DDGS(timeout=10).text(
-            query=query,
-            region="in-en",
-            safesearch="moderate",
-            max_results=15,
-            backend="google,brave,bing,duckduckgo,wikipedia",
-        )
-    except Exception as error:
-        print(f"⚠️ Multi-engine search failed: {error}")
-
-    # One quick fallback
-    if not all_results:
-        try:
-            all_results = DDGS(timeout=8).text(
-                query=query,
-                region="in-en",
-                safesearch="moderate",
-                max_results=10,
-                backend="auto",
-            )
-        except Exception as error:
-            print(f"❌ Fallback search failed: {error}")
-            all_results = []
+    if not all_results and search_mode == "news":
+        for item in planned_queries:
+            try:
+                all_results.extend(_search_from_plan(item, "web", None, 10))
+            except Exception as error:
+                print(f"Text fallback failed for '{item}': {error}")
 
     if not all_results:
         return ""
@@ -1481,12 +1526,35 @@ def search_web(query, max_results=6):
     if not unique_results:
         return ""
 
+    if needs_freshness and freshness_days is not None:
+        cutoff = datetime.now(timezone.utc) - timedelta(days=freshness_days)
+        unique_results = [
+            result
+            for result in unique_results
+            if (
+                _parse_result_date(result.get("date")) is not None
+                and _parse_result_date(result.get("date")) >= cutoff
+            )
+        ]
+
+    if not unique_results:
+        return ""
+
     for result in unique_results:
         url = result.get("href") or result.get("url") or ""
-
+        fresh = freshness_score(
+            result,
+            news_query=needs_freshness,
+            horizon=(
+                timedelta(days=freshness_days)
+                if freshness_days is not None
+                else None
+            ),
+        )
         result["_score"] = (
-            relevance_score(query, result)
-            + source_score(url)
+            relevance_score(query, result) * 2
+            + source_score(url) * 2
+            + fresh * 3
         )
 
     best_results = sorted(

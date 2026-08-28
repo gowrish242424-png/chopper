@@ -600,6 +600,8 @@ def summarize_web_results(query, web_results, search_plan):
     system_prompt = """
 You are Chopper AI's web research assistant.
 Use only the supplied web-search results to answer the user's question.
+Never call browser.open, browser.search, or any other tool. All information you
+need is already included in the supplied results. Return only normal answer text.
 Give a direct answer first. Do not invent information. If sources disagree,
 mention it. Prefer primary and official sources. Include a short Sources section
 with relevant source names, publication dates when supplied, and exact URLs.
@@ -625,19 +627,28 @@ PUBLIC WEB-SEARCH RESULTS:
 
 Answer the user's question using only these results.
 """
-    response = client.chat.completions.create(
-        model="openai/gpt-oss-20b",
-        messages=[
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": user_prompt},
-        ],
-        temperature=0.1,
-        max_completion_tokens=600,
-    )
-    answer = response.choices[0].message.content
-    if not answer:
-        raise RuntimeError("Groq returned an empty response.")
-    return answer.strip()
+    try:
+        response = client.chat.completions.create(
+            model=os.environ.get(
+                "GROQ_SUMMARY_MODEL",
+                "openai/gpt-oss-20b",
+            ),
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt},
+            ],
+            temperature=0.1,
+            max_completion_tokens=600,
+        )
+        answer = response.choices[0].message.content
+        if answer:
+            return answer.strip()
+    except Exception as error:
+        # Some models may incorrectly emit browser.open even though no tools
+        # were supplied. Never fail the user's search because of that.
+        print(f"Web summarization failed; returning results directly: {error}")
+
+    return web_results.strip()
 
 
 @app.route("/search", methods=["POST"])
@@ -667,7 +678,10 @@ def search():
         })
     except Exception as error:
         print(f"Search or summarization failed: {error}")
-        return jsonify({"success": False, "error": str(error)}), 500
+        return jsonify({
+            "success": False,
+            "error": "Web search is temporarily unavailable. Please try again.",
+        }), 500
 
 
 @app.errorhandler(413)

@@ -148,7 +148,10 @@ def is_date_query(query):
 
 def is_weather_query(query):
     q = query.lower()
-    return any(word in q for word in ("weather", "temperature", "forecast"))
+    return any(
+        word in q
+        for word in ("weather", "temperature", "forecast", "climate")
+    )
 
 
 def is_news_query(query):
@@ -1502,6 +1505,22 @@ def search_web(query, max_results=6, search_plan=None):
     if not query:
         return "Please provide something to search for."
 
+    # Use the dedicated live APIs before ordinary web search. These helpers
+    # existed previously, but were never called by search_web().
+    try:
+        if is_time_query(query) or is_date_query(query):
+            live_context = get_live_time_context(query)
+            if live_context:
+                return live_context
+
+        if is_weather_query(query):
+            live_context = get_live_weather_context(query)
+            if live_context:
+                return live_context
+    except Exception as error:
+        # If a live API is temporarily unavailable, continue with web search.
+        print(f"Live information lookup failed: {error}")
+
     plan = search_plan if isinstance(search_plan, dict) else {}
     search_mode = plan.get("search_mode", "web")
     if search_mode not in {"news", "web"}:
@@ -1558,18 +1577,25 @@ def search_web(query, max_results=6, search_plan=None):
     if not unique_results:
         return ""
 
-    unique_results = [
+    # Keep a fallback copy. The semantic plan can occasionally be too strict
+    # and remove every result even when the search engine returned useful data.
+    unfiltered_results = list(unique_results)
+
+    semantic_results = [
         result
         for result in unique_results
         if _matches_required_groups(result, required_groups)
     ]
 
-    if not unique_results:
-        return ""
+    if semantic_results:
+        unique_results = semantic_results
+    else:
+        print("Semantic filtering removed all results; using search fallback.")
+        unique_results = unfiltered_results
 
     if needs_freshness and freshness_days is not None:
         cutoff = datetime.now(timezone.utc) - timedelta(days=freshness_days)
-        unique_results = [
+        fresh_results = [
             result
             for result in unique_results
             if (
@@ -1577,9 +1603,10 @@ def search_web(query, max_results=6, search_plan=None):
                 and _parse_result_date(result.get("date")) >= cutoff
             )
         ]
-
-    if not unique_results:
-        return ""
+        if fresh_results:
+            unique_results = fresh_results
+        else:
+            print("Freshness filtering removed all results; using newest fallback.")
 
     for result in unique_results:
         url = result.get("href") or result.get("url") or ""

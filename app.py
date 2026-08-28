@@ -97,6 +97,54 @@ Rules:
     return answer.strip()
 
 
+def message_needs_live_search(message):
+    """Detect live-information questions received through the sidebar chat."""
+    text = message.lower().strip()
+
+    live_phrases = (
+        "weather",
+        "climate",
+        "temperature",
+        "forecast",
+        "latest",
+        "news",
+        "breaking",
+        "current time",
+        "time now",
+        "what time",
+        "today's date",
+        "todays date",
+        "current date",
+        "date today",
+        "right now",
+        "currently",
+        "current prime minister",
+        "current chief minister",
+        "who is the prime minister",
+        "who is the pm",
+        "who is the chief minister",
+        "who is the cm",
+        "current president",
+        "current governor",
+        "current ceo",
+    )
+
+    return any(phrase in text for phrase in live_phrases)
+
+
+def generate_live_search_response(query):
+    """Run the same web-search pipeline used by the full Chopper screen."""
+    search_plan = create_web_search_plan(query)
+    web_results = search_web(
+        query,
+        max_results=search_plan["result_count"],
+        search_plan=search_plan,
+    )
+    if not web_results:
+        raise RuntimeError("No web results were returned.")
+    return summarize_web_results(query, web_results, search_plan)
+
+
 @app.route("/chat", methods=["POST"])
 def chat():
     data = request.get_json(silent=True) or {}
@@ -105,6 +153,14 @@ def chat():
     if not message:
         return jsonify({"success": False, "error": "No message provided"}), 400
     try:
+        # The sidebar uses /chat for every message. Route live questions through
+        # the same web pipeline as the full Chopper screen.
+        if message_needs_live_search(message):
+            return jsonify({
+                "success": True,
+                "result": generate_live_search_response(message),
+            })
+
         return jsonify({
             "success": True,
             "result": generate_chat_response(message, history),

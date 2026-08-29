@@ -2,4 +2,4 @@ flask
 ddgs
 gunicorn
 groq
-openai
+Pillow

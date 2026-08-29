@@ -4,12 +4,15 @@ import io
 import json
 import os
 import re
+import secrets
 import time
+import urllib.error
+import urllib.request
 from datetime import datetime, timezone
 
 from flask import Flask, jsonify, request
 from groq import Groq
-from openai import OpenAI
+from PIL import Image
 
 from tools.web_tool import search_web
 
@@ -289,27 +292,27 @@ def vision():
 # IMAGE GENERATION TOOL
 # =========================================================
 
-IMAGE_MODEL = os.environ.get("OPENAI_IMAGE_MODEL", "gpt-image-2").strip()
+CLOUDFLARE_IMAGE_MODEL = os.environ.get(
+    "CLOUDFLARE_IMAGE_MODEL",
+    "@cf/black-forest-labs/flux-2-klein-4b",
+).strip()
+CLOUDFLARE_GENERATION_FALLBACK_MODEL = (
+    "@cf/black-forest-labs/flux-1-schnell"
+)
+CLOUDFLARE_EDIT_FALLBACK_MODEL = (
+    "@cf/runwayml/stable-diffusion-v1-5-img2img"
+)
 SUPPORTED_IMAGE_QUALITIES = {"low", "medium", "high", "auto"}
-SUPPORTED_IMAGE_SIZES = {
-    "auto",
-    "1024x1024",
-    "1536x1024",
-    "1024x1536",
-    "2048x2048",
-    "2048x1152",
-    "3840x2160",
-    "2160x3840",
-}
 
 
-def get_openai_client():
-    api_key = os.environ.get("OPENAI_API_KEY", "").strip()
-    if not api_key:
+def get_cloudflare_credentials():
+    account_id = os.environ.get("CLOUDFLARE_ACCOUNT_ID", "").strip()
+    api_token = os.environ.get("CLOUDFLARE_API_TOKEN", "").strip()
+    if not account_id or not api_token:
         raise RuntimeError(
-            "OPENAI_API_KEY is not configured on the Render server."
+            "Cloudflare image generation is not configured on the Render server."
         )
-    return OpenAI(api_key=api_key, timeout=180.0, max_retries=0)
+    return account_id, api_token
 
 
 def _requested_image_quality(prompt, requested_quality=None):
@@ -344,11 +347,18 @@ def _requested_image_quality(prompt, requested_quality=None):
     return "high" if any(item in lowered for item in high_quality_phrases) else "medium"
 
 
-def _requested_image_size(prompt, requested_size=None, editing=False):
-    """Choose a useful aspect ratio without requiring an Android app update."""
+def _requested_image_dimensions(prompt, requested_size=None, source_size=None):
+    """Choose a useful Cloudflare aspect ratio without an Android update."""
     size = str(requested_size or "").strip().lower()
-    if size in SUPPORTED_IMAGE_SIZES:
-        return size
+    explicit_sizes = {
+        "1024x1024": (1024, 1024),
+        "1024x768": (1024, 768),
+        "768x1024": (768, 1024),
+        "1536x1024": (1024, 768),
+        "1024x1536": (768, 1024),
+    }
+    if size in explicit_sizes:
+        return explicit_sizes[size]
 
     lowered = prompt.lower()
     portrait_phrases = (
@@ -371,12 +381,16 @@ def _requested_image_size(prompt, requested_size=None, editing=False):
         "16:9",
     )
     if any(item in lowered for item in portrait_phrases):
-        return "1024x1536"
+        return 768, 1024
     if any(item in lowered for item in landscape_phrases):
-        return "1536x1024"
-    if editing:
-        return "auto"
-    return "1024x1024"
+        return 1024, 768
+    if source_size:
+        source_width, source_height = source_size
+        if source_width > source_height * 1.15:
+            return 1024, 768
+        if source_height > source_width * 1.15:
+            return 768, 1024
+    return 1024, 1024
 
 
 def _fallback_enhanced_prompt(prompt, editing=False):
@@ -410,7 +424,7 @@ def enhance_image_prompt(prompt, editing=False):
     task = "image editing" if editing else "image generation"
     system_prompt = f"""
 You are Chopper's expert {task} prompt writer.
-Rewrite the user's instruction into one production-quality prompt for GPT Image.
+Rewrite the user's instruction into one production-quality prompt for FLUX.2.
 
 Rules:
 1. Preserve the user's exact intent, named subjects, quantities, relationships,
@@ -454,95 +468,289 @@ Rules:
     return fallback
 
 
-def _run_openai_image_request(operation):
-    """Retry only failures that are normally temporary."""
-    for attempt in range(2):
-        try:
-            return operation()
-        except Exception as error:
-            status_code = getattr(error, "status_code", None)
-            transient = status_code in {408, 409, 429, 500, 502, 503, 504}
-            if transient and attempt == 0:
-                time.sleep(2)
-                continue
-
-            if status_code == 401:
-                raise RuntimeError(
-                    "The Render OPENAI_API_KEY is invalid or expired."
-                ) from error
-            if status_code == 429:
-                raise RuntimeError(
-                    "OpenAI image usage limit was reached. Check billing or try again shortly."
-                ) from error
-            if status_code == 400:
-                raise RuntimeError(
-                    "OpenAI could not process this image request. Try a clearer prompt "
-                    "or a different source image."
-                ) from error
-            raise RuntimeError(f"OpenAI image request failed: {error}") from error
+class CloudflareImageError(RuntimeError):
+    def __init__(self, message, status_code=None):
+        super().__init__(message)
+        self.status_code = status_code
 
 
-def _extract_openai_image_base64(result):
-    data = getattr(result, "data", None) or []
-    image_base64 = str(
-        getattr(data[0], "b64_json", "") if data else ""
-    ).strip()
-    if not image_base64:
-        raise RuntimeError("OpenAI returned an empty image.")
-    decoded = base64.b64decode(image_base64, validate=True)
-    if not decoded:
-        raise RuntimeError("OpenAI returned invalid image data.")
-    return image_base64
-
-
-def generate_image_with_openai(prompt, quality, size):
-    client = get_openai_client()
-    enhanced_prompt = enhance_image_prompt(prompt, editing=False)
-
-    result = _run_openai_image_request(
-        lambda: client.images.generate(
-            model=IMAGE_MODEL,
-            prompt=enhanced_prompt,
-            size=size,
-            quality=quality,
-            output_format="png",
-            n=1,
-        )
+def _cloudflare_endpoint(model):
+    account_id, _api_token = get_cloudflare_credentials()
+    return (
+        "https://api.cloudflare.com/client/v4/accounts/"
+        f"{account_id}/ai/run/{model}"
     )
-    return _extract_openai_image_base64(result), enhanced_prompt
 
 
-def _detect_source_image(image_bytes):
+def _cloudflare_error_message(response_bytes, default_message):
+    try:
+        details = json.loads(response_bytes.decode("utf-8", errors="replace"))
+        errors = details.get("errors") or []
+        if errors and isinstance(errors[0], dict):
+            return str(errors[0].get("message") or default_message)
+        return str(details.get("error") or details.get("message") or default_message)
+    except Exception:
+        return default_message
+
+
+def _send_cloudflare_request(model, body, content_type, timeout=180):
+    _account_id, api_token = get_cloudflare_credentials()
+    cloudflare_request = urllib.request.Request(
+        _cloudflare_endpoint(model),
+        data=body,
+        method="POST",
+        headers={
+            "Authorization": f"Bearer {api_token}",
+            "Content-Type": content_type,
+        },
+    )
+
+    for attempt in range(3):
+        try:
+            with urllib.request.urlopen(cloudflare_request, timeout=timeout) as response:
+                return response.read(), response.headers.get_content_type()
+        except urllib.error.HTTPError as error:
+            details = error.read()
+            message = _cloudflare_error_message(
+                details,
+                f"Cloudflare image request failed ({error.code}).",
+            )
+            if error.code in {500, 502, 503, 504} and attempt < 2:
+                time.sleep((2, 5)[attempt])
+                continue
+            if error.code == 429:
+                message = (
+                    "Cloudflare's free daily AI limit was reached. "
+                    "It resets at 00:00 UTC."
+                )
+            raise CloudflareImageError(message, error.code) from error
+        except urllib.error.URLError as error:
+            if attempt < 2:
+                time.sleep((2, 5)[attempt])
+                continue
+            raise CloudflareImageError(
+                "Could not connect to Cloudflare image generation."
+            ) from error
+
+    raise CloudflareImageError("Cloudflare image request failed.")
+
+
+def _build_multipart_body(fields, source_image=None):
+    boundary = f"----ChopperBoundary{secrets.token_hex(16)}"
+    chunks = []
+
+    for name, value in fields.items():
+        chunks.extend([
+            f"--{boundary}\r\n".encode("ascii"),
+            (
+                f'Content-Disposition: form-data; name="{name}"\r\n\r\n'
+            ).encode("ascii"),
+            str(value).encode("utf-8"),
+            b"\r\n",
+        ])
+
+    if source_image is not None:
+        chunks.extend([
+            f"--{boundary}\r\n".encode("ascii"),
+            (
+                'Content-Disposition: form-data; name="input_image_0"; '
+                'filename="chopper-reference.jpg"\r\n'
+            ).encode("ascii"),
+            b"Content-Type: image/jpeg\r\n\r\n",
+            source_image,
+            b"\r\n",
+        ])
+
+    chunks.append(f"--{boundary}--\r\n".encode("ascii"))
+    return b"".join(chunks), f"multipart/form-data; boundary={boundary}"
+
+
+def _detect_image_mime(image_bytes):
     if image_bytes.startswith(b"\x89PNG\r\n\x1a\n"):
-        return "image/png", "source.png"
+        return "image/png"
     if image_bytes.startswith(b"\xff\xd8\xff"):
-        return "image/jpeg", "source.jpg"
+        return "image/jpeg"
     if image_bytes.startswith(b"RIFF") and image_bytes[8:12] == b"WEBP":
-        return "image/webp", "source.webp"
-    raise ValueError("Unsupported source image type")
+        return "image/webp"
+    return "image/jpeg"
 
 
-def edit_image_with_openai(prompt, source_image_bytes, quality, size):
-    client = get_openai_client()
-    mime_type, filename = _detect_source_image(source_image_bytes)
-    source_file = io.BytesIO(source_image_bytes)
-    source_file.name = filename
-    enhanced_prompt = enhance_image_prompt(prompt, editing=True)
+def _extract_cloudflare_image(response_bytes, content_type):
+    if content_type.startswith("image/"):
+        if not response_bytes:
+            raise CloudflareImageError("Cloudflare returned an empty image.")
+        return base64.b64encode(response_bytes).decode("ascii"), content_type
 
-    def perform_edit():
-        source_file.seek(0)
-        return client.images.edit(
-            model=IMAGE_MODEL,
-            image=source_file,
-            prompt=enhanced_prompt,
-            size=size,
-            quality=quality,
-            output_format="png",
-            n=1,
+    try:
+        response_json = json.loads(response_bytes.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise CloudflareImageError(
+            "Cloudflare returned an unsupported image response."
+        ) from error
+
+    if response_json.get("success") is False:
+        raise CloudflareImageError(
+            _cloudflare_error_message(
+                response_bytes,
+                "Cloudflare did not generate an image.",
+            )
         )
 
-    result = _run_openai_image_request(perform_edit)
-    return _extract_openai_image_base64(result), enhanced_prompt, mime_type
+    result = response_json.get("result") or response_json
+    if isinstance(result, dict):
+        image_base64 = str(result.get("image", "")).strip()
+    else:
+        image_base64 = str(result).strip()
+
+    if image_base64.startswith("data:image/") and "," in image_base64:
+        image_base64 = image_base64.split(",", 1)[1]
+    if not image_base64:
+        raise CloudflareImageError("Cloudflare returned an empty image.")
+
+    try:
+        image_bytes = base64.b64decode(image_base64, validate=True)
+    except (binascii.Error, ValueError) as error:
+        raise CloudflareImageError("Cloudflare returned invalid image data.") from error
+    return image_base64, _detect_image_mime(image_bytes)
+
+
+def _run_flux2(prompt, width, height, source_image=None, guidance=3.5):
+    fields = {
+        "prompt": prompt,
+        "width": width,
+        "height": height,
+        "guidance": guidance,
+    }
+    body, content_type = _build_multipart_body(fields, source_image=source_image)
+    response_bytes, response_type = _send_cloudflare_request(
+        CLOUDFLARE_IMAGE_MODEL,
+        body,
+        content_type,
+    )
+    return _extract_cloudflare_image(response_bytes, response_type)
+
+
+def _run_legacy_cloudflare_model(model, payload):
+    response_bytes, content_type = _send_cloudflare_request(
+        model,
+        json.dumps(payload).encode("utf-8"),
+        "application/json",
+    )
+    return _extract_cloudflare_image(response_bytes, content_type)
+
+
+def _should_use_legacy_fallback(error):
+    return getattr(error, "status_code", None) not in {401, 403, 429}
+
+
+def _guidance_for_quality(quality):
+    return 4.5 if quality == "high" else 3.5
+
+
+def generate_image_with_cloudflare(prompt, quality, dimensions):
+    enhanced_prompt = enhance_image_prompt(prompt, editing=False)
+    width, height = dimensions
+    try:
+        image_base64, mime_type = _run_flux2(
+            enhanced_prompt,
+            width,
+            height,
+            guidance=_guidance_for_quality(quality),
+        )
+        return image_base64, mime_type, enhanced_prompt, "flux-2-klein-4b"
+    except Exception as error:
+        if not _should_use_legacy_fallback(error):
+            raise
+        print(f"FLUX.2 generation failed; using FLUX.1 fallback: {error}")
+        image_base64, mime_type = _run_legacy_cloudflare_model(
+            CLOUDFLARE_GENERATION_FALLBACK_MODEL,
+            {
+                "prompt": enhanced_prompt,
+                "steps": 8,
+                "seed": secrets.randbelow(2_147_483_647),
+            },
+        )
+        return image_base64, mime_type, enhanced_prompt, "flux-1-schnell"
+
+
+def _prepare_reference_image(source_image_bytes):
+    try:
+        with Image.open(io.BytesIO(source_image_bytes)) as source_image:
+            source_image.load()
+            original_size = source_image.size
+            if not original_size[0] or not original_size[1]:
+                raise ValueError("Invalid image dimensions")
+            if original_size[0] > 12000 or original_size[1] > 12000:
+                raise ValueError("Source image dimensions are too large")
+
+            prepared = source_image.convert("RGB")
+            prepared.thumbnail((512, 512), Image.Resampling.LANCZOS)
+            output = io.BytesIO()
+            prepared.save(output, format="JPEG", quality=95, optimize=True)
+            return output.getvalue(), original_size
+    except (OSError, ValueError) as error:
+        raise ValueError("Unsupported or damaged source image") from error
+
+
+def edit_image_with_cloudflare(
+    prompt,
+    source_image_bytes,
+    quality,
+    requested_size=None,
+):
+    reference_image, source_size = _prepare_reference_image(source_image_bytes)
+    dimensions = _requested_image_dimensions(
+        prompt,
+        requested_size=requested_size,
+        source_size=source_size,
+    )
+    enhanced_prompt = enhance_image_prompt(prompt, editing=True)
+    flux_prompt = (
+        "Use input image 0 as the source image. "
+        f"{enhanced_prompt}"
+    )
+    width, height = dimensions
+
+    try:
+        image_base64, mime_type = _run_flux2(
+            flux_prompt,
+            width,
+            height,
+            source_image=reference_image,
+            guidance=_guidance_for_quality(quality),
+        )
+        return (
+            image_base64,
+            mime_type,
+            enhanced_prompt,
+            "flux-2-klein-4b",
+            dimensions,
+        )
+    except Exception as error:
+        if not _should_use_legacy_fallback(error):
+            raise
+        print(f"FLUX.2 editing failed; using Stable Diffusion fallback: {error}")
+        image_base64, mime_type = _run_legacy_cloudflare_model(
+            CLOUDFLARE_EDIT_FALLBACK_MODEL,
+            {
+                "prompt": enhanced_prompt,
+                "negative_prompt": (
+                    "blurry, low quality, distorted face, duplicate person, "
+                    "extra limbs, extra fingers, bad anatomy, text errors, artifacts"
+                ),
+                "image_b64": base64.b64encode(reference_image).decode("ascii"),
+                "strength": 0.55,
+                "guidance": 7.5,
+                "num_steps": 20,
+            },
+        )
+        return (
+            image_base64,
+            mime_type,
+            enhanced_prompt,
+            "stable-diffusion-v1-5-img2img",
+            dimensions,
+        )
 
 
 @app.route("/generate-image", methods=["POST"])
@@ -557,17 +765,19 @@ def generate_image():
 
     try:
         quality = _requested_image_quality(prompt, data.get("quality"))
-        size = _requested_image_size(prompt, data.get("size"))
-        image_base64, _enhanced_prompt = generate_image_with_openai(
-            prompt, quality, size
+        dimensions = _requested_image_dimensions(prompt, data.get("size"))
+        image_base64, mime_type, _enhanced_prompt, model_name = (
+            generate_image_with_cloudflare(prompt, quality, dimensions)
         )
+        width, height = dimensions
         return jsonify({
             "success": True,
             "prompt": prompt,
-            "mime_type": "image/png",
+            "mime_type": mime_type,
             "image_base64": image_base64,
             "quality": quality,
-            "size": size,
+            "size": f"{width}x{height}",
+            "model": model_name,
         })
     except (binascii.Error, ValueError):
         return jsonify({"success": False, "error": "Invalid generated image"}), 502
@@ -597,17 +807,27 @@ def edit_image():
                 "error": "Source image is empty or too large",
             }), 400
         quality = _requested_image_quality(prompt, data.get("quality"))
-        size = _requested_image_size(prompt, data.get("size"), editing=True)
-        edited_base64, _enhanced_prompt, _source_mime_type = edit_image_with_openai(
-            prompt, source_image_bytes, quality, size
+        (
+            edited_base64,
+            mime_type,
+            _enhanced_prompt,
+            model_name,
+            dimensions,
+        ) = edit_image_with_cloudflare(
+            prompt,
+            source_image_bytes,
+            quality,
+            requested_size=data.get("size"),
         )
+        width, height = dimensions
         return jsonify({
             "success": True,
             "prompt": prompt,
-            "mime_type": "image/png",
+            "mime_type": mime_type,
             "image_base64": edited_base64,
             "quality": quality,
-            "size": size,
+            "size": f"{width}x{height}",
+            "model": model_name,
         })
     except (binascii.Error, ValueError):
         return jsonify({"success": False, "error": "Invalid source image"}), 400

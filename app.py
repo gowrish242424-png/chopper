@@ -667,7 +667,6 @@ def generate_image_with_cloudflare(prompt, quality, dimensions):
             {
                 "prompt": enhanced_prompt,
                 "steps": 8,
-                "seed": secrets.randbelow(2_147_483_647),
             },
         )
         return image_base64, mime_type, enhanced_prompt, "flux-1-schnell"

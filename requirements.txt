@@ -2,3 +2,4 @@ flask
 ddgs
 gunicorn
 groq
+openai

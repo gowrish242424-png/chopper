@@ -974,15 +974,84 @@ def _guidance_for_quality(quality):
 
 
 def _safe_generation_retry_prompt(plan):
-    """Use a short neutral prompt for one controlled retry after a false flag."""
+    """Build a harmless alternative without repeating rejected prompt wording."""
     category = plan.get("category", "general")
     style = plan.get("style", "unspecified")
-    request_text = plan.get("request", "").strip()
+    request_text = plan.get("request", "").lower()
+
+    safe_subjects = {
+        "portrait": "one original adult person with natural features",
+        "vehicle": "one modern sports car with physically coherent details",
+        "anime": "one original adult animated traveler",
+        "landscape": "a peaceful natural landscape",
+        "product": "one fictional unbranded product",
+        "typography": "a clean decorative poster with no written words",
+        "architecture": "a fictional modern building",
+        "food": "a freshly prepared fictional meal",
+        "general": "a peaceful original scene with a clear focal subject",
+    }
+    safe_styles = {
+        "photorealistic": "believable photographic style",
+        "cinematic": "cinematic lighting and balanced framing",
+        "anime": "polished animated illustration style",
+        "illustration": "polished digital illustration style",
+        "watercolor": "soft watercolor painting style",
+        "oil-painting": "traditional oil-painting style",
+        "3d-render": "clean three-dimensional render style",
+        "pixel-art": "clean pixel-art style",
+        "minimalist": "simple minimalist style",
+        "unspecified": "polished visual style",
+    }
+    safe_scenes = (
+        ("mountain", "on a scenic mountain overlook"),
+        ("beach", "on a quiet beach"),
+        ("forest", "in a peaceful forest"),
+        ("city", "in a fictional modern city"),
+        ("chennai", "in a fictional South Indian city"),
+        ("road", "on a quiet road"),
+        ("space", "in a fictional outer-space setting"),
+        ("studio", "in a simple studio setting"),
+    )
+    scene = next(
+        (description for keyword, description in safe_scenes if keyword in request_text),
+        "in a simple scenic setting",
+    )
+    if "sunset" in request_text:
+        scene += " at sunset"
+    elif "sunrise" in request_text:
+        scene += " at sunrise"
+    elif "night" in request_text:
+        scene += " at night"
+
+    colors = (
+        "red", "orange", "yellow", "green", "blue", "purple", "pink",
+        "black", "white", "silver", "gold",
+    )
+    color = next((item for item in colors if item in request_text), "")
+    color_detail = f" Use a {color} accent color." if color else ""
+
     return (
-        f"Create one {style} {category} image. Request: {request_text}. "
-        "Include only the requested subjects and setting. Use coherent composition, "
-        "natural lighting, clean geometry, and no unrelated additions."
-    )[:3000]
+        f"Create one harmless, original image of {safe_subjects.get(category, safe_subjects['general'])} "
+        f"{scene}. Use {safe_styles.get(style, safe_styles['unspecified'])}."
+        f"{color_detail} Keep the scene calm and nonviolent. Do not include weapons, "
+        "conflict, injuries, real people, existing fictional characters, brands, logos, "
+        "watermarks, or written text. Use coherent anatomy, geometry, perspective, and lighting."
+    )[:1800]
+
+
+def _safety_adjusted_plan(plan):
+    adjusted = dict(plan)
+    safety_notice = (
+        "Cloudflare rejected the original request, so Chopper generated a safe, "
+        "original alternative."
+    )
+    current_notice = str(adjusted.get("notice") or "").strip()
+    adjusted["notice"] = (
+        f"{current_notice} {safety_notice}".strip()
+        if current_notice
+        else safety_notice
+    )
+    return adjusted
 
 
 def generate_image_with_cloudflare(prompt, quality, dimensions):
@@ -1011,30 +1080,33 @@ def generate_image_with_cloudflare(prompt, quality, dimensions):
         attempts = 1
         if _is_flagged_image_error(primary_error):
             retry_prompt = _safe_generation_retry_prompt(plan)
-            print("FLUX.2 generation was flagged; retrying once with a neutral prompt.")
+            print(
+                "FLUX.2 generation was flagged; retrying once with a harmless "
+                "original prompt on FLUX.1."
+            )
             try:
-                image_base64, mime_type = _run_flux2(
-                    retry_prompt,
-                    width,
-                    height,
-                    guidance=3.5,
+                image_base64, mime_type = _run_legacy_cloudflare_model(
+                    CLOUDFLARE_GENERATION_FALLBACK_MODEL,
+                    {
+                        "prompt": retry_prompt,
+                        "steps": 8,
+                    },
                 )
                 return (
                     image_base64,
                     mime_type,
                     retry_prompt,
-                    "flux-2-klein-4b",
-                    plan,
+                    "flux-1-schnell",
+                    _safety_adjusted_plan(plan),
                     2,
                 )
             except Exception as retry_error:
-                attempts = 2
                 if _is_flagged_image_error(retry_error):
                     raise CloudflareImageError(
-                        "Cloudflare rejected this image request after one safe retry. "
-                        "Try a different, neutral description."
+                        "Cloudflare could not generate even the harmless alternative. "
+                        "Please try again later."
                     ) from retry_error
-                primary_error = retry_error
+                raise
 
         print(
             "FLUX.2 generation failed; using FLUX.1 fallback: "

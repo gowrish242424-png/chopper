@@ -299,6 +299,9 @@ CLOUDFLARE_IMAGE_MODEL = os.environ.get(
 CLOUDFLARE_GENERATION_FALLBACK_MODEL = (
     "@cf/black-forest-labs/flux-1-schnell"
 )
+CLOUDFLARE_EDIT_FALLBACK_MODEL = (
+    "@cf/stabilityai/stable-diffusion-xl-base-1.0"
+)
 SUPPORTED_IMAGE_QUALITIES = {"low", "medium", "high", "auto"}
 
 
@@ -640,6 +643,21 @@ def _should_use_legacy_fallback(error):
     return getattr(error, "status_code", None) not in {401, 403, 429}
 
 
+def _is_flagged_image_error(error):
+    message = str(error).lower()
+    return "flagged" in message or "safety filter" in message
+
+
+def _safe_edit_prompt(prompt):
+    """Keep editing instructions direct so prompt expansion does not trip filters."""
+    instruction = re.sub(r"\s+", " ", prompt).strip()
+    return (
+        "Edit input image 0 according to this request: "
+        f"{instruction}. Keep all visible details not mentioned in the request unchanged. "
+        "Return one natural, coherent edited image."
+    )
+
+
 def _guidance_for_quality(quality):
     return 4.5 if quality == "high" else 3.5
 
@@ -702,27 +720,66 @@ def edit_image_with_cloudflare(
         requested_size=requested_size,
         source_size=source_size,
     )
-    enhanced_prompt = enhance_image_prompt(prompt, editing=True)
-    flux_prompt = (
-        "Use input image 0 as the source image. "
-        f"{enhanced_prompt}"
-    )
+    editing_prompt = _safe_edit_prompt(prompt)
     width, height = dimensions
 
-    image_base64, mime_type = _run_flux2(
-        flux_prompt,
-        width,
-        height,
-        source_image=reference_image,
-        guidance=_guidance_for_quality(quality),
-    )
-    return (
-        image_base64,
-        mime_type,
-        enhanced_prompt,
-        "flux-2-klein-4b",
-        dimensions,
-    )
+    try:
+        image_base64, mime_type = _run_flux2(
+            editing_prompt,
+            width,
+            height,
+            source_image=reference_image,
+            guidance=_guidance_for_quality(quality),
+        )
+        return (
+            image_base64,
+            mime_type,
+            editing_prompt,
+            "flux-2-klein-4b",
+            dimensions,
+        )
+    except Exception as flux_error:
+        if not _should_use_legacy_fallback(flux_error):
+            raise
+        print(f"FLUX.2 editing failed; using SDXL fallback: {flux_error}")
+
+        fallback_prompt = (
+            f"{prompt.strip()}. Preserve the main subject and all details that "
+            "the request does not ask to change. Produce a natural, clean edit."
+        )
+        try:
+            image_base64, mime_type = _run_legacy_cloudflare_model(
+                CLOUDFLARE_EDIT_FALLBACK_MODEL,
+                {
+                    "prompt": fallback_prompt,
+                    "negative_prompt": (
+                        "blurry, distorted, duplicate, extra limbs, bad anatomy, "
+                        "unwanted text, watermark, visual artifacts"
+                    ),
+                    "image_b64": base64.b64encode(reference_image).decode("ascii"),
+                    "strength": 0.55,
+                    "guidance": 7.5,
+                    "num_steps": 20,
+                    "width": width,
+                    "height": height,
+                },
+            )
+            return (
+                image_base64,
+                mime_type,
+                fallback_prompt,
+                "stable-diffusion-xl-base-1.0",
+                dimensions,
+            )
+        except Exception as fallback_error:
+            if _is_flagged_image_error(flux_error) or _is_flagged_image_error(
+                fallback_error
+            ):
+                raise CloudflareImageError(
+                    "Cloudflare's safety filter rejected this prompt or input image. "
+                    "Try a shorter neutral edit instruction or a different source image."
+                ) from fallback_error
+            raise
 
 
 @app.route("/generate-image", methods=["POST"])

@@ -299,9 +299,6 @@ CLOUDFLARE_IMAGE_MODEL = os.environ.get(
 CLOUDFLARE_GENERATION_FALLBACK_MODEL = (
     "@cf/black-forest-labs/flux-1-schnell"
 )
-CLOUDFLARE_EDIT_FALLBACK_MODEL = (
-    "@cf/runwayml/stable-diffusion-v1-5-img2img"
-)
 SUPPORTED_IMAGE_QUALITIES = {"low", "medium", "high", "auto"}
 
 
@@ -683,7 +680,9 @@ def _prepare_reference_image(source_image_bytes):
                 raise ValueError("Source image dimensions are too large")
 
             prepared = source_image.convert("RGB")
-            prepared.thumbnail((512, 512), Image.Resampling.LANCZOS)
+            # Cloudflare requires every FLUX.2 reference image to be strictly
+            # smaller than 512x512, so neither edge may equal 512.
+            prepared.thumbnail((511, 511), Image.Resampling.LANCZOS)
             output = io.BytesIO()
             prepared.save(output, format="JPEG", quality=95, optimize=True)
             return output.getvalue(), original_size
@@ -710,46 +709,20 @@ def edit_image_with_cloudflare(
     )
     width, height = dimensions
 
-    try:
-        image_base64, mime_type = _run_flux2(
-            flux_prompt,
-            width,
-            height,
-            source_image=reference_image,
-            guidance=_guidance_for_quality(quality),
-        )
-        return (
-            image_base64,
-            mime_type,
-            enhanced_prompt,
-            "flux-2-klein-4b",
-            dimensions,
-        )
-    except Exception as error:
-        if not _should_use_legacy_fallback(error):
-            raise
-        print(f"FLUX.2 editing failed; using Stable Diffusion fallback: {error}")
-        image_base64, mime_type = _run_legacy_cloudflare_model(
-            CLOUDFLARE_EDIT_FALLBACK_MODEL,
-            {
-                "prompt": enhanced_prompt,
-                "negative_prompt": (
-                    "blurry, low quality, distorted face, duplicate person, "
-                    "extra limbs, extra fingers, bad anatomy, text errors, artifacts"
-                ),
-                "image_b64": base64.b64encode(reference_image).decode("ascii"),
-                "strength": 0.55,
-                "guidance": 7.5,
-                "num_steps": 20,
-            },
-        )
-        return (
-            image_base64,
-            mime_type,
-            enhanced_prompt,
-            "stable-diffusion-v1-5-img2img",
-            dimensions,
-        )
+    image_base64, mime_type = _run_flux2(
+        flux_prompt,
+        width,
+        height,
+        source_image=reference_image,
+        guidance=_guidance_for_quality(quality),
+    )
+    return (
+        image_base64,
+        mime_type,
+        enhanced_prompt,
+        "flux-2-klein-4b",
+        dimensions,
+    )
 
 
 @app.route("/generate-image", methods=["POST"])

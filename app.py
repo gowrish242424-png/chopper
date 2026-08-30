@@ -303,6 +303,143 @@ CLOUDFLARE_EDIT_FALLBACK_MODEL = (
     "@cf/stabilityai/stable-diffusion-xl-base-1.0"
 )
 SUPPORTED_IMAGE_QUALITIES = {"low", "medium", "high", "auto"}
+SUPPORTED_IMAGE_CATEGORIES = {
+    "portrait",
+    "vehicle",
+    "anime",
+    "landscape",
+    "product",
+    "typography",
+    "architecture",
+    "food",
+    "general",
+}
+SUPPORTED_IMAGE_STYLES = {
+    "photorealistic",
+    "cinematic",
+    "anime",
+    "illustration",
+    "watercolor",
+    "oil-painting",
+    "3d-render",
+    "pixel-art",
+    "minimalist",
+    "unspecified",
+}
+
+IMAGE_CATEGORY_PATTERNS = (
+    ("typography", ("poster", "logo", "typography", "flyer", "book cover")),
+    (
+        "vehicle",
+        (
+            "car", "bike", "motorcycle", "truck", "bus", "vehicle",
+            "nissan", "ferrari", "lamborghini", "porsche", "bmw",
+            "mercedes", "audi", "tesla",
+        ),
+    ),
+    (
+        "anime",
+        (
+            "anime", "manga", "naruto", "one piece", "dragon ball",
+            "cartoon character",
+        ),
+    ),
+    (
+        "landscape",
+        (
+            "landscape", "mountain", "beach", "forest", "waterfall",
+            "sunset", "sunrise", "ocean", "river", "countryside",
+            "cityscape", "skyline",
+        ),
+    ),
+    (
+        "portrait",
+        (
+            "portrait", "headshot", "selfie", "person", "man", "woman",
+            "boy", "girl", "actor", "actress", "singer", "celebrity",
+            "politician", "cricketer", "footballer",
+        ),
+    ),
+    (
+        "product",
+        (
+            "product photo", "product shot", "packaging", "advertisement",
+            "commercial photo",
+        ),
+    ),
+    (
+        "architecture",
+        (
+            "building", "house", "villa", "temple", "church", "mosque",
+            "architecture", "interior", "room",
+        ),
+    ),
+    ("food", ("food", "dish", "meal", "cake", "pizza", "biryani", "drink")),
+)
+
+IMAGE_STYLE_PATTERNS = (
+    ("cinematic", ("cinematic", "movie still", "film still")),
+    ("photorealistic", ("photorealistic", "photo realistic", "realistic photo")),
+    ("anime", ("anime", "manga")),
+    ("watercolor", ("watercolor", "watercolour")),
+    ("oil-painting", ("oil painting", "painted canvas")),
+    ("3d-render", ("3d render", "3d-rendered", "cgi")),
+    ("pixel-art", ("pixel art", "8-bit art", "16-bit art")),
+    ("minimalist", ("minimalist", "minimal style")),
+    ("illustration", ("illustration", "digital art", "concept art", "cartoon")),
+)
+
+CATEGORY_PROMPT_REQUIREMENTS = {
+    "portrait": (
+        "Use believable facial structure, natural skin texture, symmetrical eyes, "
+        "realistic hands when visible, and flattering subject-focused lighting."
+    ),
+    "vehicle": (
+        "Keep the requested make, model, body shape, paint color, wheel count, "
+        "perspective, reflections, road contact, and motion physically coherent."
+    ),
+    "anime": (
+        "Keep the character design, silhouette, clothing, pose, line work, and "
+        "anime visual language internally consistent."
+    ),
+    "landscape": (
+        "Use a clear foreground, middle ground, and background with natural depth, "
+        "consistent atmosphere, horizon, shadows, and environmental lighting."
+    ),
+    "product": (
+        "Keep the product geometry, material, branding request, clean edges, and "
+        "studio lighting suitable for a professional catalogue image."
+    ),
+    "typography": (
+        "Treat every quoted word as exact text, spell it correctly, keep it legible, "
+        "and use a balanced layout with clear visual hierarchy."
+    ),
+    "architecture": (
+        "Use structurally coherent geometry, straight lines, consistent perspective, "
+        "realistic materials, scale, and lighting."
+    ),
+    "food": (
+        "Use appetizing natural texture, accurate ingredients, realistic portions, "
+        "clean plating, and food-photography lighting."
+    ),
+    "general": (
+        "Use coherent geometry, clean edges, consistent lighting, natural depth, "
+        "and a clear focal point."
+    ),
+}
+
+STYLE_PROMPT_REQUIREMENTS = {
+    "photorealistic": "Render as a believable photograph with natural materials and optics.",
+    "cinematic": "Use cinematic framing, motivated lighting, controlled contrast, and depth.",
+    "anime": "Render with polished anime line work, expressive shapes, and coherent cel shading.",
+    "illustration": "Render as a polished professional illustration with deliberate shapes and color.",
+    "watercolor": "Use layered watercolor washes, paper texture, and controlled soft edges.",
+    "oil-painting": "Use convincing oil-paint texture, brushwork, color mixing, and canvas depth.",
+    "3d-render": "Use physically coherent 3D geometry, materials, lighting, and camera perspective.",
+    "pixel-art": "Use a consistent pixel grid, limited palette, crisp clusters, and no soft blur.",
+    "minimalist": "Use simple intentional forms, restrained colors, and generous negative space.",
+    "unspecified": "Choose one coherent visual style appropriate for the requested subject.",
+}
 
 
 def get_cloudflare_credentials():
@@ -393,53 +530,183 @@ def _requested_image_dimensions(prompt, requested_size=None, source_size=None):
     return 1024, 1024
 
 
-def _fallback_enhanced_prompt(prompt, editing=False):
-    """Reliable prompt structure used if the Groq prompt enhancer is unavailable."""
-    if editing:
-        return (
-            "Edit the supplied image according to this exact instruction:\n"
-            f"{prompt}\n\n"
-            "Preserve every element that the instruction does not ask to change, "
-            "including the subject's identity and recognizable features, pose, "
-            "composition, perspective, lighting, colors, background, and image style. "
-            "Make the requested change natural, clean, coherent, and free of visual "
-            "artifacts. Do not add unrelated objects. Preserve all quoted text exactly."
-        )
-    return (
-        "Create one polished image that follows this request exactly:\n"
-        f"{prompt}\n\n"
-        "Keep every requested subject, count, relationship, color, position, style, "
-        "and quoted word accurate. Use a clear composition, coherent lighting, natural "
-        "depth, clean edges, and visually consistent details. Do not add unrelated "
-        "objects or change the user's intent. Render any quoted text exactly as written."
+def _contains_image_phrase(text, phrase):
+    return _image_phrase_match(text, phrase) is not None
+
+
+def _image_phrase_match(text, phrase):
+    return re.search(
+        rf"(?<![a-z0-9]){re.escape(phrase)}(?![a-z0-9])",
+        text,
     )
 
 
-def enhance_image_prompt(prompt, editing=False):
-    """Expand short prompts while preserving the user's exact visual intent."""
-    fallback = _fallback_enhanced_prompt(prompt, editing=editing)
+def _detect_image_category(prompt):
+    lowered = prompt.lower()
+    best_match = None
+    for category, phrases in IMAGE_CATEGORY_PATTERNS:
+        for phrase in phrases:
+            match = _image_phrase_match(lowered, phrase)
+            if match is not None and (
+                best_match is None or match.start() < best_match[0]
+            ):
+                best_match = (match.start(), category)
+    if best_match is not None:
+        return best_match[1]
+
+    # A short request containing only a likely personal name is normally a
+    # portrait request, for example "Deepika Padukone".
+    words = re.findall(r"[a-zA-Z][a-zA-Z.'-]*", prompt)
+    if 2 <= len(words) <= 4:
+        return "portrait"
+    return "general"
+
+
+def _detect_image_style(prompt, category):
+    lowered = prompt.lower()
+    # If the user mentions conflicting styles, the final stated style wins.
+    last_match = None
+    for style, phrases in IMAGE_STYLE_PATTERNS:
+        for phrase in phrases:
+            match = _image_phrase_match(lowered, phrase)
+            if match is not None and (
+                last_match is None or match.start() > last_match[0]
+            ):
+                last_match = (match.start(), style)
+    if last_match is not None:
+        return last_match[1]
+    if category == "anime":
+        return "anime"
+    if category in {"portrait", "vehicle", "product", "architecture", "food"}:
+        return "photorealistic"
+    return "unspecified"
+
+
+def _fallback_named_identity(prompt, category):
+    lowered = prompt.lower()
+    identity_hints = (
+        "celebrity", "actor", "actress", "singer", "politician",
+        "cricketer", "footballer", "famous person", "public figure",
+        "naruto", "deepika padukone",
+    )
+    if any(_contains_image_phrase(lowered, phrase) for phrase in identity_hints):
+        return True
+    generic_person_terms = (
+        "person", "man", "woman", "boy", "girl", "child", "portrait",
+        "headshot", "selfie",
+    )
+    if any(
+        _contains_image_phrase(lowered, phrase)
+        for phrase in generic_person_terms
+    ):
+        return False
+    words = re.findall(r"[a-zA-Z][a-zA-Z.'-]*", prompt)
+    return category == "portrait" and 2 <= len(words) <= 6
+
+
+def _extract_prompt_plan_json(content):
+    cleaned = re.sub(
+        r"<think>[\s\S]*?</think>",
+        "",
+        str(content or ""),
+        flags=re.IGNORECASE,
+    ).strip()
+    cleaned = re.sub(r"^```(?:json)?\s*|\s*```$", "", cleaned).strip()
+    start = cleaned.find("{")
+    end = cleaned.rfind("}")
+    if start < 0 or end <= start:
+        raise ValueError("Prompt planner did not return a JSON object")
+    parsed = json.loads(cleaned[start:end + 1])
+    if not isinstance(parsed, dict):
+        raise ValueError("Prompt planner returned an invalid JSON value")
+    return parsed
+
+
+def _compose_generation_prompt(request, category, style, named_identity):
+    category_rule = CATEGORY_PROMPT_REQUIREMENTS.get(
+        category,
+        CATEGORY_PROMPT_REQUIREMENTS["general"],
+    )
+    style_rule = STYLE_PROMPT_REQUIREMENTS.get(
+        style,
+        STYLE_PROMPT_REQUIREMENTS["unspecified"],
+    )
+    identity_rule = ""
+    if named_identity:
+        identity_rule = (
+            " Represent the requested named person or character faithfully where the "
+            "model has reliable visual knowledge. Preserve their recognizable age "
+            "range, facial structure, hair, skin tone, clothing, and signature traits; "
+            "do not silently replace them with an unrelated generic subject."
+        )
+
+    return (
+        "Create one polished image from this exact request:\n"
+        f"{request}\n\n"
+        f"Subject template: {category}. {category_rule}\n"
+        f"Visual style: {style}. {style_rule}{identity_rule}\n"
+        "Accuracy constraints: preserve every requested subject, count, relationship, "
+        "color, position, action, location, and quoted word. Do not add unrelated "
+        "objects. If instructions conflict, follow the user's last stated instruction. "
+        "Keep anatomy, geometry, perspective, lighting, shadows, and background "
+        "internally consistent."
+    )[:6000]
+
+
+def _fallback_generation_plan(prompt):
+    normalized = re.sub(r"\s+", " ", prompt).strip()
+    category = _detect_image_category(normalized)
+    named_identity = _fallback_named_identity(normalized, category)
+    if named_identity and category == "general":
+        category = "portrait"
+    style = _detect_image_style(normalized, category)
+    notice = ""
+    if named_identity:
+        notice = (
+            "AI-generated interpretation: the free model may not reproduce an exact "
+            "facial or character identity."
+        )
+    return {
+        "request": normalized,
+        "category": category,
+        "style": style,
+        "named_identity": named_identity,
+        "notice": notice,
+        "enhanced_prompt": _compose_generation_prompt(
+            normalized,
+            category,
+            style,
+            named_identity,
+        ),
+    }
+
+
+def create_image_generation_plan(prompt):
+    """Create one validated plan for templates, style, conflicts, and notices."""
+    fallback = _fallback_generation_plan(prompt)
     if os.environ.get("IMAGE_PROMPT_ENHANCEMENT", "true").lower() == "false":
         return fallback
 
-    task = "image editing" if editing else "image generation"
-    system_prompt = f"""
-You are Chopper's expert {task} prompt writer.
-Rewrite the user's instruction into one production-quality prompt for FLUX.2.
+    system_prompt = """
+You plan image generation for Chopper. Return only one JSON object:
+{
+  "normalized_request": "complete rewritten visual request",
+  "category": "portrait|vehicle|anime|landscape|product|typography|architecture|food|general",
+  "style": "photorealistic|cinematic|anime|illustration|watercolor|oil-painting|3d-render|pixel-art|minimalist|unspecified",
+  "named_identity": false
+}
 
 Rules:
-1. Preserve the user's exact intent, named subjects, quantities, relationships,
-   colors, positions, style, and every quoted word.
-2. Never invent important objects, people, branding, or text.
-3. Resolve ambiguity only with neutral visual details such as composition,
-   lighting, material, depth, and camera framing.
-4. State the main subject and action first, then composition, style, lighting,
-   and precise constraints.
-5. If visible text is requested, repeat it exactly inside quotation marks and
-   require correct spelling.
-6. For editing, clearly state what changes and require everything else to remain
-   unchanged, especially identity, facial features, pose, framing, background,
-   lighting, and style unless the user requested those changes.
-7. Return only the improved prompt. Do not explain your work.
+1. Preserve every requested subject, name, quantity, relationship, action,
+   color, position, location, style, and quoted word.
+2. Resolve only clear contradictions. Keep the user's last stated instruction
+   when two visual instructions conflict.
+3. Add only neutral production details needed for composition, camera framing,
+   lighting, materials, depth, and clean output.
+4. Set named_identity=true when a specific real person, celebrity, or fictional
+   character is named and their recognizable identity matters.
+5. Never claim that a generated likeness will be exact.
+6. Do not include Markdown, commentary, or additional JSON fields.
 """.strip()
 
     try:
@@ -448,24 +715,68 @@ Rules:
             model=os.environ.get("GROQ_PROMPT_MODEL", "openai/gpt-oss-20b"),
             messages=[
                 {"role": "system", "content": system_prompt},
-                {"role": "user", "content": prompt},
+                {"role": "user", "content": fallback["request"]},
             ],
-            temperature=0.15,
+            temperature=0.05,
             max_completion_tokens=700,
         )
-        enhanced = (response.choices[0].message.content or "").strip()
-        enhanced = re.sub(
-            r"<think>[\s\S]*?</think>",
-            "",
-            enhanced,
-            flags=re.IGNORECASE,
+        parsed = _extract_prompt_plan_json(response.choices[0].message.content)
+        normalized = re.sub(
+            r"\s+",
+            " ",
+            str(parsed.get("normalized_request") or ""),
         ).strip()
-        if enhanced:
-            return enhanced[:6000]
-    except Exception as error:
-        print(f"Image prompt enhancement failed; using fallback: {error}")
+        if not normalized or len(normalized) > 4000:
+            normalized = fallback["request"]
 
-    return fallback
+        category = str(parsed.get("category") or "").strip().lower()
+        if category not in SUPPORTED_IMAGE_CATEGORIES:
+            category = fallback["category"]
+        elif category == "general" and fallback["category"] != "general":
+            category = fallback["category"]
+
+        style = str(parsed.get("style") or "").strip().lower()
+        if style not in SUPPORTED_IMAGE_STYLES:
+            style = fallback["style"]
+        elif style == "unspecified" and fallback["style"] != "unspecified":
+            style = fallback["style"]
+
+        named_identity = (
+            parsed.get("named_identity") is True or fallback["named_identity"]
+        )
+        notice = ""
+        if named_identity:
+            notice = (
+                "AI-generated interpretation: the free model may not reproduce an "
+                "exact facial or character identity."
+            )
+        return {
+            "request": normalized,
+            "category": category,
+            "style": style,
+            "named_identity": named_identity,
+            "notice": notice,
+            "enhanced_prompt": _compose_generation_prompt(
+                normalized,
+                category,
+                style,
+                named_identity,
+            ),
+        }
+    except Exception as error:
+        print(f"Image prompt planning failed; using deterministic plan: {error}")
+        return fallback
+
+
+def enhance_image_prompt(prompt, editing=False):
+    """Compatibility wrapper retained for existing Chopper integrations."""
+    if editing:
+        instruction = re.sub(r"\s+", " ", prompt).strip()
+        return (
+            f"Apply this visual edit: {instruction}. Preserve every visible detail "
+            "that the instruction does not explicitly ask to change."
+        )
+    return create_image_generation_plan(prompt)["enhanced_prompt"]
 
 
 class CloudflareImageError(RuntimeError):
@@ -662,8 +973,21 @@ def _guidance_for_quality(quality):
     return 4.5 if quality == "high" else 3.5
 
 
+def _safe_generation_retry_prompt(plan):
+    """Use a short neutral prompt for one controlled retry after a false flag."""
+    category = plan.get("category", "general")
+    style = plan.get("style", "unspecified")
+    request_text = plan.get("request", "").strip()
+    return (
+        f"Create one {style} {category} image. Request: {request_text}. "
+        "Include only the requested subjects and setting. Use coherent composition, "
+        "natural lighting, clean geometry, and no unrelated additions."
+    )[:3000]
+
+
 def generate_image_with_cloudflare(prompt, quality, dimensions):
-    enhanced_prompt = enhance_image_prompt(prompt, editing=False)
+    plan = create_image_generation_plan(prompt)
+    enhanced_prompt = plan["enhanced_prompt"]
     width, height = dimensions
     try:
         image_base64, mime_type = _run_flux2(
@@ -672,11 +996,50 @@ def generate_image_with_cloudflare(prompt, quality, dimensions):
             height,
             guidance=_guidance_for_quality(quality),
         )
-        return image_base64, mime_type, enhanced_prompt, "flux-2-klein-4b"
-    except Exception as error:
-        if not _should_use_legacy_fallback(error):
+        return (
+            image_base64,
+            mime_type,
+            enhanced_prompt,
+            "flux-2-klein-4b",
+            plan,
+            1,
+        )
+    except Exception as primary_error:
+        if not _should_use_legacy_fallback(primary_error):
             raise
-        print(f"FLUX.2 generation failed; using FLUX.1 fallback: {error}")
+
+        attempts = 1
+        if _is_flagged_image_error(primary_error):
+            retry_prompt = _safe_generation_retry_prompt(plan)
+            print("FLUX.2 generation was flagged; retrying once with a neutral prompt.")
+            try:
+                image_base64, mime_type = _run_flux2(
+                    retry_prompt,
+                    width,
+                    height,
+                    guidance=3.5,
+                )
+                return (
+                    image_base64,
+                    mime_type,
+                    retry_prompt,
+                    "flux-2-klein-4b",
+                    plan,
+                    2,
+                )
+            except Exception as retry_error:
+                attempts = 2
+                if _is_flagged_image_error(retry_error):
+                    raise CloudflareImageError(
+                        "Cloudflare rejected this image request after one safe retry. "
+                        "Try a different, neutral description."
+                    ) from retry_error
+                primary_error = retry_error
+
+        print(
+            "FLUX.2 generation failed; using FLUX.1 fallback: "
+            f"{primary_error}"
+        )
         image_base64, mime_type = _run_legacy_cloudflare_model(
             CLOUDFLARE_GENERATION_FALLBACK_MODEL,
             {
@@ -684,7 +1047,14 @@ def generate_image_with_cloudflare(prompt, quality, dimensions):
                 "steps": 8,
             },
         )
-        return image_base64, mime_type, enhanced_prompt, "flux-1-schnell"
+        return (
+            image_base64,
+            mime_type,
+            enhanced_prompt,
+            "flux-1-schnell",
+            plan,
+            attempts + 1,
+        )
 
 
 def _prepare_reference_image(source_image_bytes):
@@ -789,9 +1159,14 @@ def generate_image():
     try:
         quality = _requested_image_quality(prompt, data.get("quality"))
         dimensions = _requested_image_dimensions(prompt, data.get("size"))
-        image_base64, mime_type, _enhanced_prompt, model_name = (
-            generate_image_with_cloudflare(prompt, quality, dimensions)
-        )
+        (
+            image_base64,
+            mime_type,
+            _enhanced_prompt,
+            model_name,
+            generation_plan,
+            attempts,
+        ) = generate_image_with_cloudflare(prompt, quality, dimensions)
         width, height = dimensions
         return jsonify({
             "success": True,
@@ -801,6 +1176,11 @@ def generate_image():
             "quality": quality,
             "size": f"{width}x{height}",
             "model": model_name,
+            "category": generation_plan["category"],
+            "style": generation_plan["style"],
+            "identity_limited": generation_plan["named_identity"],
+            "notice": generation_plan["notice"],
+            "attempts": attempts,
         })
     except (binascii.Error, ValueError):
         return jsonify({"success": False, "error": "Invalid generated image"}), 502

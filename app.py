@@ -749,7 +749,10 @@ def edit_image_with_cloudflare(
                 CLOUDFLARE_EDIT_FALLBACK_MODEL,
                 {
                     "prompt": fallback_prompt,
-                    "image_b64": base64.b64encode(reference_image).decode("ascii"),
+                    # The SDXL REST runtime requires the encoded image bytes in
+                    # the `image` tensor. `image_b64` is documented but is not
+                    # mapped to the model tensor by every deployed runtime.
+                    "image": list(reference_image),
                     "strength": 0.55,
                 },
             )

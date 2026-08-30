@@ -652,9 +652,9 @@ def _safe_edit_prompt(prompt):
     """Keep editing instructions direct so prompt expansion does not trip filters."""
     instruction = re.sub(r"\s+", " ", prompt).strip()
     return (
-        "Edit input image 0 according to this request: "
-        f"{instruction}. Keep all visible details not mentioned in the request unchanged. "
-        "Return one natural, coherent edited image."
+        f"Apply this visual edit: {instruction}. "
+        "Preserve the foreground subject, composition, and art style unless the "
+        "instruction explicitly asks to change them."
     )
 
 
@@ -743,25 +743,14 @@ def edit_image_with_cloudflare(
             raise
         print(f"FLUX.2 editing failed; using SDXL fallback: {flux_error}")
 
-        fallback_prompt = (
-            f"{prompt.strip()}. Preserve the main subject and all details that "
-            "the request does not ask to change. Produce a natural, clean edit."
-        )
+        fallback_prompt = _safe_edit_prompt(prompt)
         try:
             image_base64, mime_type = _run_legacy_cloudflare_model(
                 CLOUDFLARE_EDIT_FALLBACK_MODEL,
                 {
                     "prompt": fallback_prompt,
-                    "negative_prompt": (
-                        "blurry, distorted, duplicate, extra limbs, bad anatomy, "
-                        "unwanted text, watermark, visual artifacts"
-                    ),
                     "image_b64": base64.b64encode(reference_image).decode("ascii"),
                     "strength": 0.55,
-                    "guidance": 7.5,
-                    "num_steps": 20,
-                    "width": width,
-                    "height": height,
                 },
             )
             return (
@@ -772,14 +761,16 @@ def edit_image_with_cloudflare(
                 dimensions,
             )
         except Exception as fallback_error:
-            if _is_flagged_image_error(flux_error) or _is_flagged_image_error(
-                fallback_error
-            ):
+            print(f"SDXL editing fallback failed: {fallback_error}")
+            if _is_flagged_image_error(fallback_error):
                 raise CloudflareImageError(
-                    "Cloudflare's safety filter rejected this prompt or input image. "
-                    "Try a shorter neutral edit instruction or a different source image."
+                    "Cloudflare rejected this source image during editing. "
+                    "Try an image without a visible watermark or use a different source image."
                 ) from fallback_error
-            raise
+            raise CloudflareImageError(
+                "The primary editor rejected the request and the SDXL fallback failed: "
+                f"{fallback_error}"
+            ) from fallback_error
 
 
 @app.route("/generate-image", methods=["POST"])

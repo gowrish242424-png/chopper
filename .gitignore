@@ -35,3 +35,14 @@ memory_system/generation_timings.json
 **/build/
 .gradle/
 **/app/src/main/assets/
+
+ChopperMobile/sherpa-kws-temp/
+ChopperMobile/**/assets/*.onnx
+ChopperMobile/**/assets/*.tflite
+ChopperMobile/**/assets/*.task
+
+*.zip
+*.task
+*.onnx
+*.tflite
+ChopperMobile/sherpa-kws-temp/

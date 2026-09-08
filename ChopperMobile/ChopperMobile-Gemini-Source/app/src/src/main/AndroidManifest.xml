@@ -1,0 +1,168 @@
+<?xml version="1.0" encoding="utf-8"?>
+
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <!-- Hardware used by Chopper -->
+    <uses-feature
+        android:name="android.hardware.camera"
+        android:required="false" />
+
+    <uses-feature
+        android:name="android.hardware.microphone"
+        android:required="true" />
+
+    <!-- Network -->
+    <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+
+    <!-- Security -->
+    <uses-permission android:name="android.permission.USE_BIOMETRIC" />
+
+    <!-- Camera and voice -->
+    <uses-permission android:name="android.permission.CAMERA" />
+    <uses-permission android:name="android.permission.RECORD_AUDIO" />
+
+    <!-- Foreground services -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MICROPHONE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
+
+    <!-- Floating sidebar -->
+    <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
+
+    <!-- Notifications and screen wake -->
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <uses-permission android:name="android.permission.WAKE_LOCK" />
+
+    <application
+        android:allowBackup="false"
+        android:fullBackupContent="false"
+        android:dataExtractionRules="@xml/data_extraction_rules"
+        android:icon="@mipmap/ic_launcher"
+        android:label="Chopper"
+        android:roundIcon="@mipmap/ic_launcher_round"
+        android:supportsRtl="true"
+        android:theme="@style/Theme.ChopperMobile"
+        android:usesCleartextTraffic="false">
+
+        <!-- File sharing -->
+        <provider
+            android:name="androidx.core.content.FileProvider"
+            android:authorities="${applicationId}.fileprovider"
+            android:exported="false"
+            android:grantUriPermissions="true">
+
+            <meta-data
+                android:name="android.support.FILE_PROVIDER_PATHS"
+                android:resource="@xml/chopper_file_paths" />
+
+        </provider>
+
+        <!-- Wake word listener -->
+        <service
+            android:name=".WakeWordService"
+            android:exported="false"
+            android:foregroundServiceType="microphone"
+            android:stopWithTask="false" />
+
+        <!-- Android Digital Assistant -->
+        <service
+            android:name=".ChopperVoiceInteractionService"
+            android:exported="true"
+            android:label="Chopper"
+            android:permission="android.permission.BIND_VOICE_INTERACTION">
+
+            <intent-filter>
+                <action android:name="android.service.voice.VoiceInteractionService" />
+            </intent-filter>
+
+            <meta-data
+                android:name="android.voice_interaction"
+                android:resource="@xml/chopper_voice_interaction_service" />
+
+        </service>
+
+        <!-- Assistant session -->
+        <service
+            android:name=".ChopperVoiceSessionService"
+            android:exported="true"
+            android:permission="android.permission.BIND_VOICE_INTERACTION" />
+
+        <!-- Speech recognition -->
+        <service
+            android:name=".ChopperRecognitionService"
+            android:exported="true"
+            android:label="Chopper voice recognition"
+            android:permission="android.permission.BIND_SPEECH_RECOGNITION">
+
+            <intent-filter>
+                <action android:name="android.speech.RecognitionService" />
+            </intent-filter>
+
+        </service>
+
+        <!-- Autofill authentication -->
+        <activity
+            android:name=".ChopperAutofillAuthActivity"
+            android:excludeFromRecents="true"
+            android:exported="false"
+            android:noHistory="true"
+            android:theme="@style/Theme.ChopperMobile" />
+
+        <!-- Autofill save confirmation -->
+        <activity
+            android:name=".ChopperAutofillSaveActivity"
+            android:excludeFromRecents="true"
+            android:exported="false"
+            android:noHistory="true"
+            android:theme="@style/Theme.ChopperMobile" />
+
+        <!-- Chopper Autofill -->
+        <service
+            android:name=".ChopperAutofillService"
+            android:exported="true"
+            android:label="Chopper Autofill"
+            android:permission="android.permission.BIND_AUTOFILL_SERVICE">
+
+            <intent-filter>
+                <action android:name="android.service.autofill.AutofillService" />
+            </intent-filter>
+
+            <meta-data
+                android:name="android.autofill"
+                android:resource="@xml/chopper_autofill_service" />
+
+        </service>
+
+        <!-- Floating Chopper sidebar -->
+        <service
+            android:name=".ChopperSidebarService"
+            android:exported="false"
+            android:foregroundServiceType="specialUse"
+            android:stopWithTask="false">
+
+            <property
+                android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+                android:value="User-enabled floating Chopper assistant sidebar" />
+
+        </service>
+
+        <!-- Main Chopper interface -->
+        <activity
+            android:name=".MainActivity"
+            android:configChanges="orientation|screenSize|screenLayout|keyboardHidden|uiMode"
+            android:exported="true"
+            android:screenOrientation="unspecified"
+            android:theme="@style/Theme.ChopperMobile"
+            android:windowSoftInputMode="adjustResize">
+
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+
+        </activity>
+
+    </application>
+
+</manifest>
